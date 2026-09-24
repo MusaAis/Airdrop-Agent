@@ -1,0 +1,15 @@
+[Unit]
+Description=Airdrop Agent Backend
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/airdrop-agent
+EnvironmentFile=/home/ubuntu/airdrop-agent/.env
+ExecStart=/usr/bin/python3 -m backend.main
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

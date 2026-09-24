@@ -1,0 +1,21 @@
+.env
+airdrop.db
+airdrop.db-shm
+airdrop.db-wal
+*.log
+cat.save
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node
+node_modules/
+dist/
+build/
+
+# OS/editor
+.DS_Store
+.vscode/
