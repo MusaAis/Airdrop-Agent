@@ -1,0 +1,241 @@
+# Airdrop-Agent — Project Plan
+
+**Status:** Planning complete, execution not yet started
+**Environment:** Testnet only — no mainnet deployment
+**Last updated:** 2026-09-25 (created)
+**Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase.
+
+This is the reference document for the Airdrop-Agent rebuild: what the system does today, what's being removed and why, what's being kept, what's being improved, what's being built new, and where the project is headed after that. Use this as the source of truth during the build — not the chat history.
+
+---
+
+## 1. What the project is
+
+A self-hosted airdrop farming agent: manages HD/imported wallets across multiple EVM chains, runs configured on-chain tasks (swap/bridge/stake/liquidity/transfer) against registered projects on a schedule, tracks eligibility against manually-defined criteria, claims faucets and airdrops, and reports on all of it via a Telegram bot and a React dashboard. Backend is FastAPI + SQLAlchemy (async) + SQLite, frontend is Vite + React.
+
+---
+
+## 2. Current capabilities (as of this plan)
+
+### Wallets
+- Generate HD wallets from a master seed, or import raw private keys (encrypted at rest, AES via PBKDF2-derived key)
+- Status lifecycle: active / paused / archived / blacklisted / cooldown
+- Tagging and grouping
+- Per-wallet "persona": active hours, sleep timing, gas multiplier, amount distribution, bidirectional-swap default, daily tx range
+- Gas auto-refill via faucets when balance drops below a warning threshold
+- Balance tracking (native + registered ERC20s) with USD valuation, refreshed on-demand or in bulk
+- Health score and Sybil risk score per wallet
+
+### Chains
+- Register EVM chains with primary + fallback RPC URLs, automatic failover on connection
+- Gas token config (native or ERC20), per-chain token registry (symbol → address/decimals)
+- Gas price sampling (every 10 min) with 6-hour rolling average and spike detection (configurable multiplier)
+- RPC latency testing, per-chain rate limiting
+
+### Projects & tasks
+- Projects: name, type (ecosystem/dapp), status, priority, max concurrent wallets, chain associations, notes, TGE/airdrop dates
+- Task configs per project: swap, bridge, stake, unstake, provide/remove liquidity, transfer, generic contract interaction
+- Amount ranges with weighted-random distribution (low/high/uniform), daily tx targets (min/max, randomized per wallet per day via seeded hash), task dependencies, bidirectional token pairs
+- Eligibility criteria (manually or AI-extracted from docs): tx count, volume, time, governance, token-hold, social — tracked per wallet with a progress %
+
+### Execution engine
+- Fixed-slot worker pool with priority-weighted proportional queue fill (project.priority / total priority)
+- Nonce locking with staleness recovery, gas-spike deferral, memory-pressure pause, contract-pause check
+- Token approval flow (exact-amount, JIT, separate nonce) with human-like delay
+- Transaction simulation (`eth_call`) before broadcast, dry-run mode (global toggle, checked at the actual broadcast chokepoint)
+- Stuck-tx handling: auto speed-up (higher gas price) then auto-cancel, with a watchdog that detects and respawns frozen worker slots
+- Per-project circuit breaker: auto-pauses after 5 consecutive failures, manually resettable
+
+### Faucets
+- Per-chain or per-project faucet registration with fallback URLs, cooldown periods, multi-token payouts
+- Manual, threshold-triggered (checked every 30 min), and scheduled (every 24h) claiming
+
+### Claims
+- Scans registered claim contracts for claimable balances across active wallets
+- USD-value estimate via price oracle
+- **(Removed — see §3)** Auto-execution below a configurable threshold
+
+### AI (Gemini primary + Groq validator, cross-checked)
+- Dual validation for: risk assessment, ROI estimate, criteria extraction, config-change safety, gap analysis (task config vs criteria), Sybil correlation review
+- Agreement scoring compares only structured decision fields (not prose), flags `requires_human` below 70% agreement
+- Natural-language Telegram command router (Gemini primary, Groq fallback)
+- **(Removed — see §3)** Discovery/scraping-based project finding, ROI estimation
+
+### Sybil detection
+- Correlates wallets by transaction timing proximity, task-sequence overlap, and gas-price reuse
+- Feeds AI review on a scheduled interval
+
+### Reporting
+- Eligibility %, ROI *(removed)*, daily progress, gas usage, Sybil report, activity log, live server health (RAM/CPU/disk/worker slots), CSV export
+
+### Auth & security
+- JWT access + refresh tokens, TOTP 2FA with QR enrollment, device-trust cookies (skip 2FA on remembered devices), brute-force lockout (DB-persisted), IP whitelist middleware, encrypted seed/private-key storage
+- **(Removed — see §3)** Encrypted nightly DB backup
+
+### Interfaces
+- Telegram bot: 150+ slash commands + natural-language fallback, confirmation flow for destructive actions
+- React dashboard: wallets, balances, chains, tasks, projects, logs, reports, faucets, claims, Sybil risk, snapshot calendar, AI log, notifications, proxies (stub), settings (stub)
+- WebSocket live log/status feed with HTTP polling fallback
+
+### Alerts
+- Telegram push for gas spikes, stuck tx, Sybil flags, claim thresholds, daily summary
+- **(Removed — see §3)** New-project-found alerts (discovery is gone)
+
+### Kill switch
+- Emergency stop: halts new task dispatch and clears the queue; cannot un-broadcast an already-submitted transaction
+- Global dry-run toggle enforced at the actual broadcast point, not just the queue-fill loop
+
+---
+
+## 3. Removals
+
+Each item: what it is, why it's going, what (if anything) replaces it.
+
+| # | Item | Why removed | Replacement |
+|---|---|---|---|
+| 1 | **Discovery/scraping system** — `backend/discovery/` (6 scrapers: DefiLlama, CryptoRank, airdrops.io, Twitter/Nitter, RootData, L2Beat), the aggregator, the processor, the 6-hourly scheduler job, `/ai/discovery/*` API routes, Telegram `discovery.*` commands, AI Log's "Discovery Status" dashboard card | Projects will be submitted manually only — by Musa via Telegram/website, and (per the beginner-friendly goal) potentially by other users via the website. No automatic source scraping anywhere, including the website. | Manual project submission flow (§5.5) |
+| 2 | **AI ROI estimator** — `prompt_roi`, `get_roi_report`, `report_roi` (Telegram + dashboard) | No real market/funding data feeds it now that scraping is gone — it was already a rough LLM guess anchored to a handful of hardcoded historical airdrops. Kept it would mean showing confident-looking numbers with no basis. | None — dropped, not replaced |
+| 3 | **Backup system** — `backend/security/backup.py`, the nightly `_run_backup` scheduler job, `system_backup` Telegram command | Explicit removal request. | None — user manages backups outside the app |
+| 4 | **Auto-claim execution** — the auto-fire path inside `auto_claim_if_below_threshold`, `claim_set_threshold`, `claim_auto_on`, `claim_auto_off` | Explicit removal request: claiming is a fund-moving action and should always be a deliberate manual trigger. | Manual `claim_trigger` stays; claim scanning/tracking (`claim_check`, `claim_eligible`, `claim_pending`) stays as-is |
+| 5 | **Telegram command surface** — cut from ~150 to ~45 commands (full before/after list in §4) | Most commands were config-heavy, rarely used on mobile, or duplicated what the dashboard already shows better as a table/form. | Cut commands' functionality moves to the website dashboard, which gets built out to cover them (see §5.5, §6) |
+
+Also removed as direct consequences of the above:
+- `DiscoveryRun` DB model and its dashboard usage
+- Discovery-related imports/branches in `telegram/bot.py` and `telegram/commands/help.py`
+- The dead/deprecated `backend/discovery/scheduler.py` (already unused, just deleting the corpse)
+
+---
+
+## 4. Telegram command surface: before → after
+
+Approved curated set (~45 commands). Everything not listed here either moves to the website (still exists, just not as a Telegram command) or is deleted outright (discovery, ROI, backup, auto-claim toggles).
+
+| Category | Kept in Telegram | Moved to website only |
+|---|---|---|
+| Wallet | `wallet_create`, `wallet_list`, `wallet_status`, `wallet_balance`, `wallet_pause`, `wallet_resume`, `wallet_blacklist`, `wallet_archive`, `wallet_tag`, `wallet_group`, `wallet_fund`, `wallet_health`, `wallet_sybil`, `wallet_top`, `wallet_failing`, `wallet_set_gas` | `wallet_unblacklist`, `wallet_unarchive`, `wallet_untag`, `wallet_cooldown`, `wallet_persona`, `wallet_nonce`, `wallet_gas_wallets` |
+| Chain | `chain_list`, `chain_add`, `chain_enable`, `chain_disable`, `chain_status`, `chain_gas`, `chain_add_token`, `chain_tokens` | `chain_rpc`, `chain_add_fallback`, `chain_remove_fallback`, `chain_test_rpc`, `chain_gas_token`, `chain_set_rate_limit` |
+| Task | `task_list`, `task_status`, `task_enable`, `task_pause`, `task_trigger` | `task_dry_run` (folds into global dry-run toggle), `task_deps`, `task_set_priority`, `task_trigger_all`, `task_template` |
+| Project | `project_list`, `project_add`, `project_status`, `project_enable`, `project_disable`, `project_pause`, `project_resume`, `project_approve`, `project_reject`, `project_gap`, `project_reset_circuit` | `project_farm` (dup of enable), `project_prioritize`, `project_cap`, `project_update`, `project_criteria`, `project_blacklist`, `project_circuit_breaker` |
+| Agent | `agent_status`, `agent_start`, `agent_stop`, `agent_pause_all`, `agent_resume_all`, `agent_unlock` | `agent_workers`, `agent_queue` (dashboard live views) |
+| Report | `report_eligibility`, `report_daily_progress`, `report_gas`, `report_server` | `report_sybil`, `report_activity` (dashboard does these better) — `report_roi` deleted |
+| Faucet | `faucet_request`, `faucet_bulk` | `faucet_list`, faucet CRUD (website) |
+| Claim | `claim_check`, `claim_eligible`, `claim_trigger`, `claim_pending` | `claim_history` (website) — `claim_value` folds into `claim_pending`; `claim_set_threshold`/`claim_auto_on`/`claim_auto_off` deleted (auto-claim removed) |
+| Config | `config_show`, `config_set` | `config_reset` (destructive — safer with a confirm dialog on web) |
+| AI | `ai_status`, `ai_pending`, `ai_approve`, `ai_reject`, `ai_autonomy_off`, `ai_autonomy_on` | `ai_log`, `ai_validate`, `ai_agreement` (website AI Log page) |
+| Nonce | `nonce_release_all` (emergency only) | `nonce_check`, `nonce_sync`, `nonce_release` |
+| TX | `tx_stuck`, `tx_speedup`, `tx_cancel` | `tx_status`, `tx_failed`, `tx_verify` |
+| Gas | `gas_price`, `gas_refill` | `gas_spike`, `gas_optimal`, `gas_cost`, `gas_budget`, `gas_history` |
+| Alert | `alert_list`, `alert_resolve_all` | `alert_snooze`, `alert_unsnooze`, `alert_test`, `alert_resolve`, `alert_memory` |
+| System | `system_status`, `system_version` | `system_test_rpc`, `system_maintenance`, `system_maintenance_off`, `system_log_archive` — `system_backup` deleted |
+| Schedule | — (cut entirely) | folds into `task_list` / website |
+| Proxy | — (cut entirely from Telegram) | website (already marked "coming soon" in `Proxies.jsx`) |
+| Discovery | — (all deleted) | n/a — feature removed |
+
+Net effect: Telegram becomes the **quick-action remote** (status checks, pause/resume, emergency stops, approvals). The website becomes the **real control panel** for configuration-heavy or destructive actions.
+
+---
+
+## 5. New features (build now)
+
+### 5.1 Improved natural-language command handling
+**Current state:** `nl_parser.py` routes free text through Gemini (Groq fallback) into a fixed action+params JSON, matched against a large `if/elif` chain in `bot.py`.
+**Problems to fix:**
+- The action list the LLM must choose from will shrink significantly (§4), which should *improve* accuracy — fewer, clearer choices
+- No conversation memory — every message is parsed cold, so a follow-up like "make it 10" after "add project X" has no context
+- No entity resolution — if the user says "pause my main wallet" there's no fuzzy-match against wallet tags/names, only exact IDs
+**Plan:**
+- Keep the Gemini-primary/Groq-fallback structure, update the action list/prompt to match the curated command set
+- Add short-lived conversation context (last 1–2 turns) so follow-up messages can complete a partial command
+- Add fuzzy entity resolution for wallet/project references by tag or name, not just numeric ID
+- Clearer error messages when parsing fails or confidence is low, instead of a generic "AI unavailable"
+
+### 5.2 Improved AI analyst/reporting
+**Current state:** Reports are raw data dumps (JSON or plain text lines). No synthesis, no "here's what changed" framing.
+**Plan:**
+- A daily/on-demand AI-written summary layer on top of existing reports (eligibility, gas, activity) — plain-language interpretation, not just numbers: "3 wallets fell behind their daily target on Project X, likely due to a gas spike at 14:00 UTC"
+- Trend detection: flag when a metric moves outside its recent normal range (e.g., failure rate spike, gas cost spike) rather than requiring Musa to notice it in a table
+- This reuses the existing `dual_ai_validate` infrastructure with a new `task_type="analyst_summary"` prompt — no new AI plumbing needed
+
+### 5.3 AI-managed tasks and wallets (fully autonomous, with guardrails)
+**Environment: testnet only, not mainnet.** This lowers the stakes considerably — no real funds at risk — but guardrails are still worth keeping, mainly so a bad AI decision can't spam pointless transactions, burn through faucet cooldowns, or mask a real bug behind constant auto-correction. The limits below are sized for testnet (looser than a mainnet deployment would ever get).
+
+**Confirmed scope:** fully autonomous — AI can enable/disable tasks, adjust wallet settings, and manage the queue on its own.
+
+**Guardrails:**
+- **Hard boundary — never autonomous:** AI cannot add a new project, add a new task config from scratch, change a wallet's private key/seed handling, or touch claim execution. Autonomy is scoped to *pausing/resuming/tuning what already exists*, not creating new surfaces. (This stays even on testnet — it's about preventing runaway/nonsensical behavior, not fund safety.)
+- **Every autonomous action is logged** with the reasoning that triggered it (extends `AIValidation`/`Log` — a new `ai_actions` table: what changed, why, timestamp, reversible-or-not)
+- **Every autonomous action is reversible** — pausing a task/wallet, not deleting it; adjusting `WalletSettings` fields like gas multiplier or daily tx range within pre-set safe bounds, not arbitrary values
+- **Telegram notification on every autonomous action** (ties into §5.4) — Musa sees it happen in near-real-time, doesn't have to go looking
+- **A rate limit on autonomous changes** per wallet/project per day, so a bad AI decision can't cascade — set at **10 autonomous adjustments per wallet per 24h** (loose, testnet-appropriate; tighten later if it moves to mainnet)
+- **An off switch** — one Telegram command / dashboard toggle to freeze all AI autonomy instantly, independent of the existing kill switch (which stops the whole agent, not just AI decisions)
+
+**Concrete behaviors to build:**
+- Auto-pause a wallet after N consecutive task failures *before* it hits the existing hard-coded 3-failure cooldown, if the AI's error analysis (§5.4) identifies a systemic cause (e.g. gas token depleted, RPC degraded) rather than a one-off
+- Auto-adjust a wallet's gas multiplier within safe bounds if it's consistently failing on gas price alone
+- Auto-disable a task config the gap analysis (`project.gap`, already kept) flags as unsupported by the project — this already exists for the *safe reversible half* per the existing code comment; extend the same pattern to more cases
+- Queue prioritization suggestions — not silent reordering, but AI can recommend and (if approved as autonomous) apply a priority reshuffle when a project's circuit breaker keeps tripping
+
+**This needs a decision round before implementation — see Open Questions (§7).**
+
+### 5.4 AI error notification/reporting
+**Current state:** Errors go to logs and, for some categories, to Telegram via `create_and_send_alert`. No AI synthesis — you get the raw exception string.
+**Plan:**
+- Route failure clusters (not every single failure — that's alert spam) through an AI summarization pass: "5 tasks failed on Chain X in the last hour, all with 'insufficient gas' — likely the faucet is failing or gas price spiked"
+- Distinguish transient (retry-worthy) from systemic (needs human attention) failures using the existing gas-spike/circuit-breaker signals as input to the AI's classification
+- This is the same underlying mechanism as §5.3's failure detection — they should share one "failure analysis" AI call rather than duplicating logic
+
+### 5.5 Beginner-friendly manual project add (Telegram + website)
+**Current state:** `project_add` only takes name + type; task configs, criteria, and contracts are added via separate raw commands or direct API calls with many required JSON fields (see `TaskConfigCreate`, `ProjectCriteria` schemas) — not friendly to a non-technical user.
+**Plan — Telegram:**
+- Turn `project_add` into a guided multi-step conversation (using the existing confirmation-flow pattern already in `bot.py`) instead of a single command with positional args: name → type → chain → website/socials → "add a task now?" (walks through task type, amounts, contract address with inline help text) → "add criteria now?" (optional, can be added later via AI extraction from docs if the project has a docs URL)
+**Plan — website:**
+- A step-by-step "Add Project" wizard on the dashboard (this becomes the primary path once cut commands move here per §4) — form-based, with inline validation (e.g. checksum-validate addresses before submit, warn on missing gas token config for the selected chain)
+- Reuse the existing `dual_ai_validate` criteria-extraction prompt as an *optional* "paste your project's docs URL and I'll draft criteria for you to review" step — draft only, never auto-applied without the human clicking accept (consistent with the "AI never auto-creates" boundary in §5.3)
+
+---
+
+## 6. Improvements to existing, kept features
+
+These aren't new features or removals — they're fixes/polish to things staying in the system.
+
+- **Sybil re-score scheduling:** change from fixed `IntervalTrigger(hours=12)` to a self-rescheduling job with a randomized 6–18h delay each cycle
+- **AI validation scope narrows:** `dual_ai_validate` for risk/config/criteria/gap now runs only against manually-submitted projects — same code path, different (and simpler) trigger context now that there's no scraped-candidate firehose feeding it
+- **Website dashboard build-out:** absorbs the ~105 cut Telegram commands' functionality as proper forms/tables (chain RPC management, task templates/dependencies, project criteria editor, config reset with confirm dialog, gas budget/history views, alert snooze, proxy management — currently a stub page) — this is a substantial frontend scope on its own, likely its own phase
+- **`Proxies.jsx`** currently says "coming soon" — becomes real once proxy commands move here from Telegram
+
+---
+
+## 7. Open questions — resolved
+
+1. ~~Rate limit numbers~~ — **settled:** 10 autonomous adjustments per wallet per 24h (testnet-appropriate)
+2. **Safe bounds for auto-adjustment** — **settled:** the AI may move `WalletSettings.gas_multiplier` within a 0.7×–1.8× floor/ceiling, and by no more than ±0.1 in any single adjustment (on top of the existing ±5% random variation already applied at broadcast time). Wide enough to fix a systematically-underpriced wallet, narrow enough that one bad AI call can't swing a wallet's gas spend drastically in one step. Other `WalletSettings` fields the AI may touch (daily tx range, active hours) get the same "small step, hard floor/ceiling" pattern when implemented — exact bounds for those to be set per-field during Phase 6 build, following this same principle.
+3. **The AI autonomy off-switch** — **settled:** both Telegram and dashboard, backed by one shared backend flag — same pattern as the existing `is_emergency_stop()` / `is_dry_run()` getters in `kill_switch.py` (e.g. `is_ai_autonomy_paused()`). Telegram needs it because that's where autonomous-action notifications land (§5.4) — if something looks wrong, the kill switch should be reachable from the same screen. Dashboard needs it because Settings is where every other operational toggle already lives. Both read/write the same flag; no duplicated logic.
+4. **Approval threshold reuse** — **settled:** reuse the existing 70% Gemini/Groq agreement gate from `dual_ai_validate` rather than building a second threshold system. Below 70% agreement, the action becomes a notify-and-wait suggestion instead of an autonomous action — consistent with how every other AI decision in the system already behaves.
+
+---
+
+## 8. Future roadmap — suggestions for later (not in current scope)
+
+Ideas worth considering after the current phase, not committed to yet:
+
+- **Multi-user support** — currently single-operator (one whitelisted Telegram ID set, one admin login). If the website's beginner-friendly project-add is meant for others too, the system likely needs real user accounts/roles eventually, not just IP + password + TOTP for one operator.
+- **Webhook-based faucet/claim triggers** instead of polling — `webhooks.py` already exists as a stub registry but nothing calls `dispatch_event`; wiring it up could let external services (a project's own notification bot, a claim-live announcement) push events in instead of the agent polling every 30 min.
+- **Per-project custom ABI storage** — `ProjectContract.abi_fragment` exists in the schema but generic task types (`generic.py`) still take raw hex `data` from config; a small ABI-aware builder would make manual project setup much friendlier, tying directly into §5.5.
+- **Historical gas-cost vs actual-received tracking** — now that ROI estimation (AI-guessed) is gone, a *factual* ROI view (gas spent vs tokens actually received, once claims are confirmed) would be genuinely useful and requires no AI guessing — just linking `claim_trigger` results back to `gas_cost_usd` per project.
+- **Mobile push notifications beyond Telegram** — if the website is meant for broader use, Telegram-only alerts limit it to Musa; a simple in-app notification center already exists (`Notifications.jsx`) and could gain a browser-push or email fallback.
+- **Mainnet readiness pass (if ever needed)** — the project runs testnet-only for now, which is why §5.3's guardrails are set loose. If mainnet ever comes into scope later, everything in §5.3 needs a second pass first: tighter rate limits, a stricter agreement-score gate, and probably a required-human-approval mode as the default rather than an option.
+- **Rate-limit / cooldown visualization** — a single dashboard view showing every wallet's current cooldown/active-hours/daily-target state at a glance, since this data exists (`WalletSettings`, `TaskDailyProgress`) but is currently only visible per-wallet on request.
+
+---
+
+## 9. Execution phases (proposed grouping — for reference once building starts)
+
+1. **Phase 1 — Removals:** discovery system, ROI estimator, backup system, auto-claim execution, Telegram command trim
+2. **Phase 2 — Kept-feature improvements:** Sybil re-score randomized interval, AI validation scope narrowing
+3. **Phase 3 — New feature: manual project add** (§5.5) — Telegram guided flow + website wizard
+4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2)
+5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6
+6. **Phase 6 — New feature: AI-managed tasks/wallets** (§5.3) — only after §7 open questions are answered
+7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6)
+
+This grouping is a suggestion, not a commitment — order can change based on what Musa wants tackled first once execution begins.

@@ -1,49 +1,8 @@
 from backend.ai.date_injector import get_date_prefix
 
-
-def prompt_discovery(raw_content: str) -> str:
-    return f"""{get_date_prefix()}
-
-You are a crypto airdrop analyst. Extract project data from the source text.
-
-CRITICAL RULES:
-- Only extract what is EXPLICITLY stated in the source
-- Never invent contract addresses, numbers, or dates
-- Mark each field: "explicit" = directly stated, "inferred" = concluded from context
-- If data is missing, output null — never guess
-- Output ONLY valid JSON, no other text
-
-BEFORE OUTPUTTING, verify each point:
-1. Does this project have a live token on CoinGecko or CoinMarketCap as of {get_date_prefix()}? If YES → status: "completed"
-2. Has this project already distributed its airdrop before {get_date_prefix()}? If YES → status: "completed"
-3. Did testnet start more than 6 months before {get_date_prefix()} with no TGE announcement? If YES → status: "stale"
-4. No official activity in last 30 days as of {get_date_prefix()}? If YES → status: "dead"
-5. Is this project still in active testnet or campaign phase? If YES → status: "active"
-
-OUTPUT FORMAT (JSON only, no other text):
-{{
-  "project_name": "string | null",
-  "type": "ecosystem | dapp",
-  "parent_ecosystem": "string | null",
-  "chain": "string | null",
-  "token_symbol": "string | null",
-  "status": "active | upcoming | stale | completed | dead",
-  "snapshot_date": "YYYY-MM-DD | null",
-  "tasks": [
-    {{"action": "string", "threshold": "string | null", "confidence": "explicit | inferred"}}
-  ],
-  "contract_addresses": [
-    {{"label": "string", "address": "string", "confidence": "explicit | inferred"}}
-  ],
-  "vc_backers": ["string"],
-  "kyc_required": "boolean | null",
-  "source_quotes": {{"field_name": "exact quote proving this field"}},
-  "information_gaps": ["list what was NOT mentioned in source"],
-  "overall_confidence": 0
-}}
-
-SOURCE TEXT:
-{raw_content}"""
+# prompt_discovery (scraped-source project extraction) was removed along with
+# the discovery/scraping system — projects are now submitted manually only.
+# See PLAN.md §3.
 
 
 def prompt_risk(project_data: str) -> str:
@@ -327,57 +286,8 @@ WALLET ACTIVITY DATA:
 {wallet_data}"""
 
 
-def prompt_roi(project_data: str) -> str:
-    return f"""{get_date_prefix()}
-
-Estimate the potential airdrop value for this project.
-Be conservative and transparent about uncertainty.
-Never invent numbers — ground every estimate in comparable historical airdrops.
-
-ANCHOR YOUR ESTIMATES to these verified historical airdrops:
-- Large L2 (Arbitrum Mar 2023): $300 - $3,000 average per wallet
-- Large L2 (Optimism May 2022): $200 - $1,500 average per wallet
-- DeFi protocol (Uniswap Sep 2020): $400 - $2,000 average per wallet
-- Bridge (LayerZero Jun 2024): $100 - $1,500 average per wallet
-- Infrastructure (ENS Nov 2021): $500 - $10,000 (high variance)
-- Small/new protocol: $20 - $300 average
-
-FACTORS THAT INCREASE ALLOCATION:
-- Early testnet user (multiplier effect)
-- High transaction volume over extended period
-- Long wallet age (6+ months of history)
-- Governance participation (voting, proposals)
-- Liquidity provision
-- Diverse protocol usage across the ecosystem
-
-FACTORS THAT DECREASE ALLOCATION:
-- Recent activity only (last 30 days)
-- Low transaction volume
-- Few unique interactions
-- Sybil flags or correlated behavior
-- Single-protocol focus
-
-OUTPUT (JSON only, no other text):
-{{
-  "project": "string",
-  "estimated_usd": {{
-    "conservative": 0,
-    "realistic": 0,
-    "optimistic": 0
-  }},
-  "confidence": 0,
-  "comparable_used": [
-    {{"project": "string", "avg_allocation_usd": 0, "similarity_reason": "string"}}
-  ],
-  "key_assumptions": ["string"],
-  "factors_considered": ["string"],
-  "data_quality_warning": "string | null"
-}}
-
-Note: Always include data_quality_warning if confidence < 50.
-
-PROJECT DATA:
-{project_data}"""
+# prompt_roi (AI-guessed airdrop $ value estimate) was removed — no real
+# market/funding data backs it now that scraping is gone. See PLAN.md §3.
 
 
 def prompt_gap(task_config_json: str, criteria_json: str) -> str:

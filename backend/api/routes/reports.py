@@ -3,7 +3,7 @@ from backend.security.auth import verify_token
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.reports.eligibility import get_eligibility_report
-from backend.reports.roi import get_roi_report
+from backend.reports.gas_spend import get_gas_spend_report
 from backend.reports.daily_progress import get_daily_progress_report
 from backend.reports.gas import get_gas_usage_report
 from backend.reports.sybil import get_sybil_report
@@ -32,9 +32,9 @@ async def rpc_latency(chain_id: int, _user: dict = Depends(verify_token)):
 async def eligibility_report(_user: dict = Depends(verify_token), project_id: int = None, db: AsyncSession = Depends(get_db)):
     return await get_eligibility_report(db, project_id)
 
-@router.get("/roi")
-async def roi_report(_user: dict = Depends(verify_token), project_id: int = None, db: AsyncSession = Depends(get_db)):
-    return await get_roi_report(db, project_id)
+@router.get("/gas-spend")
+async def gas_spend_report(_user: dict = Depends(verify_token), project_id: int = None, db: AsyncSession = Depends(get_db)):
+    return await get_gas_spend_report(db, project_id)
 
 @router.get("/daily-progress")
 async def daily_progress_report(_user: dict = Depends(verify_token), project_id: int = None, db: AsyncSession = Depends(get_db)):

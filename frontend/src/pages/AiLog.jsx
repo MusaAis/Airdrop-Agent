@@ -1,6 +1,5 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
-import Spinner from '../components/Spinner'
 import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
 
 function timeAgo(iso) {
@@ -14,13 +13,14 @@ function timeAgo(iso) {
   return `${Math.floor(hrs / 24)}d ago`
 }
 
+// Discovery status/runs were removed along with the discovery/scraping
+// system (see PLAN.md §3) — projects are now submitted manually only.
+// This page now shows AI validations only (risk/config/criteria/gap/sybil
+// checks run against manually-added projects).
 export default function AiLog({ token }) {
   const [entries, setEntries] = useState([])
-  const [runs, setRuns] = useState([])
-  const [nextRun, setNextRun] = useState(null)
   const [loading, setLoading] = useState(false)
   const [initialLoad, setInitialLoad] = useState(true)
-  const [triggering, setTriggering] = useState(false)
   const [selected, setSelected] = useState(null)
   const [errorMsg, setErrorMsg] = useState('')
 
@@ -28,19 +28,9 @@ export default function AiLog({ token }) {
     setLoading(true)
     setErrorMsg('')
     try {
-      const [valRes, runsRes, nextRes] = await Promise.all([
-        api.get('/ai/validations', { params: { limit: 50 } }),
-        api.get('/ai/discovery/runs', { params: { limit: 10 } }),
-        api.get('/ai/discovery/next-run'),
-      ])
+      const valRes = await api.get('/ai/validations', { params: { limit: 50 } })
       setEntries(Array.isArray(valRes.data) ? valRes.data : [])
-      setRuns(Array.isArray(runsRes.data) ? runsRes.data : [])
-      setNextRun(nextRes.data?.next_run_at || null)
     } catch (e) {
-      // Previously every fetch failure here was silently swallowed by a bare
-      // catch {}, which made the page show "No validations yet." even when
-      // the real problem was an auth error or the server being down —
-      // indistinguishable from "discovery genuinely hasn't found anything."
       setErrorMsg('Could not load AI log — check that you are logged in and the backend is reachable.')
       console.error(e)
     } finally {
@@ -51,22 +41,7 @@ export default function AiLog({ token }) {
 
   useEffect(() => { load() }, [])
 
-  const triggerDiscovery = async () => {
-    setTriggering(true)
-    try {
-      await api.post('/ai/discovery/run-now')
-      await load()
-    } catch (e) {
-      setErrorMsg('Error triggering discovery scan')
-    } finally {
-      setTriggering(false)
-    }
-  }
-
   const resolve = async (id, decision) => {
-    // Previously called POST /ai/validations/{id}/approve and /reject, which
-    // do not exist on the backend (the real route is /resolve with a
-    // human_decision param) — these buttons silently 404'd every time.
     try {
       await api.post(`/ai/validations/${id}/resolve`, null, { params: { human_decision: decision } })
       load()
@@ -75,82 +50,17 @@ export default function AiLog({ token }) {
     }
   }
 
-  const lastRun = runs[0]
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <Card title="Discovery Status">
-        <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', alignItems: 'center' }}>
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase' }}>Last run</div>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>
-              {lastRun ? (
-                <>
-                  {timeAgo(lastRun.finished_at || lastRun.started_at)}{' '}
-                  <Badge status={lastRun.status === 'success' ? 'active' : lastRun.status === 'running' ? 'pending' : 'failed'}>
-                    {lastRun.status}
-                  </Badge>
-                </>
-              ) : 'never run yet'}
-            </div>
-          </div>
-          {lastRun && lastRun.status === 'success' && (
-            <div>
-              <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase' }}>Found / Validated</div>
-              <div style={{ fontSize: 15, fontWeight: 600 }}>
-                {lastRun.raw_results_found ?? '—'} found, {lastRun.new_projects_validated ?? '—'} validated
-              </div>
-            </div>
-          )}
-          {lastRun && lastRun.status === 'failed' && (
-            <div>
-              <div style={{ fontSize: 11, color: 'var(--rose)', textTransform: 'uppercase' }}>Error</div>
-              <div style={{ fontSize: 13, color: 'var(--rose)' }}>{lastRun.error_message}</div>
-            </div>
-          )}
-          <div>
-            <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase' }}>Next scheduled run</div>
-            <div style={{ fontSize: 15, fontWeight: 600 }}>{nextRun ? new Date(nextRun).toLocaleString() : '—'}</div>
-          </div>
-          <button className="primary" onClick={triggerDiscovery} disabled={triggering} style={{ marginLeft: 'auto' }}>
-            {triggering ? <Spinner inline size={14} /> : 'Run Discovery Now'}
-          </button>
-        </div>
-      </Card>
-
-      <Card title="Recent Discovery Runs">
-        {initialLoad ? (
-          <div className="table-scroll"><table><tbody><SkeletonRows rows={3} cols={5} /></tbody></table></div>
-        ) : runs.length === 0 ? (
-          <EmptyState icon="◇" title="No discovery runs recorded yet" hint="Click 'Run Discovery Now' above, or wait for the scheduled scan." />
-        ) : (
-          <div className="table-scroll">
-            <table>
-              <thead>
-                <tr><th>When</th><th>Trigger</th><th>Status</th><th>Found</th><th>Validated</th></tr>
-              </thead>
-              <tbody>
-                {runs.map(r => (
-                  <tr key={r.id}>
-                    <td>{timeAgo(r.started_at)}</td>
-                    <td><Badge status="pending">{r.trigger}</Badge></td>
-                    <td><Badge status={r.status === 'success' ? 'active' : r.status === 'running' ? 'pending' : 'failed'}>{r.status}</Badge></td>
-                    <td>{r.raw_results_found ?? '—'}</td>
-                    <td>{r.new_projects_validated ?? '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
-
       <Card title="AI Validations">
+        <p style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: -8, marginBottom: 14 }}>
+          Risk, config, criteria, gap, and Sybil checks run by the dual-AI validator against manually-added projects and wallets.
+        </p>
         {errorMsg && <div style={{ fontSize: 13, color: 'var(--rose)', marginBottom: 12 }}>{errorMsg}</div>}
         {initialLoad ? (
           <div className="table-scroll"><table><tbody><SkeletonRows rows={5} cols={5} /></tbody></table></div>
         ) : entries.length === 0 ? (
-          <EmptyState icon="◇" title="No validations yet" hint="Validations appear here once discovery finds a project, or you trigger one manually via /ai/validate." />
+          <EmptyState icon="◇" title="No validations yet" hint="Validations appear here once you approve a project, run a gap check, or trigger one manually via /ai/validate." />
         ) : (
           <div className="table-scroll">
             <table>

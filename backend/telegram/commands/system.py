@@ -24,16 +24,6 @@ async def handle_system_status(user_id, args, db, confirmation=None):
     )
 
 
-async def handle_system_backup(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    try:
-        from backend.security.backup import encrypted_backup
-        await encrypted_backup("/home/ubuntu/airdrop-agent/airdrop.db")
-        return "✅ Encrypted backup triggered."
-    except Exception as e:
-        return f"❌ Backup failed: {e}"
-
-
 async def handle_system_test_rpc(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     from backend.models import Chain

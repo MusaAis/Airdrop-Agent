@@ -416,21 +416,5 @@ class CompetitorWallet(Base):
     transaction_patterns: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-class DiscoveryRun(Base):
-    """
-    Tracks each discovery scan (manual /discovery_run or the automatic 6-hour
-    job) so the AI Log dashboard page can show run history — previously there
-    was no record of whether/when discovery had ever run, or whether it
-    succeeded, which made it impossible to tell if the AI was "searching for
-    airdrops" without digging through server logs.
-    """
-    __tablename__ = "discovery_runs"
-    id: Mapped[int] = mapped_column(primary_key=True)
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
-    trigger: Mapped[str] = mapped_column(Text, default="scheduled")
-    status: Mapped[str] = mapped_column(Text, default="running")
-    sources_scraped: Mapped[Optional[int]] = mapped_column(Integer)
-    raw_results_found: Mapped[Optional[int]] = mapped_column(Integer)
-    new_projects_validated: Mapped[Optional[int]] = mapped_column(Integer)
-    error_message: Mapped[Optional[str]] = mapped_column(Text)
+# DiscoveryRun model removed — the discovery/scraping system it tracked was
+# removed entirely (see PLAN.md §3). Projects are now submitted manually only.

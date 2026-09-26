@@ -2,9 +2,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from backend.models import Transaction, Wallet, Project, TaskConfig
 
-async def get_roi_report(db: AsyncSession, project_id: int = None):
-    """Gas spent vs estimated token value per wallet per project."""
-    # Aggregate gas costs per wallet per project
+async def get_gas_spend_report(db: AsyncSession, project_id: int = None):
+    """
+    Factual gas spend per wallet per project — confirmed transactions only.
+    This replaces the old ROI report, which paired real gas cost against an
+    AI-guessed "estimated_token_value_usd" that was always hardcoded to 0
+    (see PLAN.md §3 — the ROI estimator was removed). This keeps only the
+    factual half: what was actually spent, with no guessed value attached.
+    """
     stmt = select(
         Wallet.address,
         Project.name,
@@ -22,16 +27,12 @@ async def get_roi_report(db: AsyncSession, project_id: int = None):
     result = await db.execute(stmt)
     rows = result.all()
 
-    report = []
-    for row in rows:
-        # For ROI, we'd need estimated airdrop value. This is a placeholder.
-        estimated_value = 0  # would come from AI estimation
-        report.append({
+    return [
+        {
             "wallet": row.address,
             "project": row.name,
             "gas_spent_usd": round(row.total_gas or 0, 2),
             "transactions": row.tx_count,
-            "estimated_token_value_usd": estimated_value,
-            "net_roi": round(estimated_value - (row.total_gas or 0), 2)
-        })
-    return report
+        }
+        for row in rows
+    ]

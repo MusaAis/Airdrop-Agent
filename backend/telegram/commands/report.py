@@ -1,7 +1,7 @@
 import logging
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.reports.eligibility import get_eligibility_report
-from backend.reports.roi import get_roi_report
+from backend.reports.gas_spend import get_gas_spend_report
 from backend.reports.daily_progress import get_daily_progress_report
 from backend.reports.activity import get_activity_log
 from backend.reports.gas import get_gas_usage_report
@@ -16,12 +16,6 @@ async def handle_report_eligibility(user_id, args, db, confirmation=None):
     proj_id = int(args[0]) if args else None
     data = await get_eligibility_report(db, proj_id)
     return "\n".join(f"{r['wallet'][:10]}... – {r['project']}: {r['eligibility_pct']}%" for r in data)
-
-async def handle_report_roi(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    proj_id = int(args[0]) if args else None
-    data = await get_roi_report(db, proj_id)
-    return "\n".join(f"{r['wallet'][:10]}... – {r['project']}: gas=${r['gas_spent_usd']} est=${r['estimated_token_value_usd']}" for r in data)
 
 async def handle_report_daily_progress(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
@@ -62,9 +56,9 @@ async def handle_report_wallets(user_id, args, db, confirmation=None):
 async def handle_report_weekly(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     from backend.reports.activity import get_activity_log
-    from backend.reports.roi import get_roi_report
-    logs = await get_activity_log(db, hours=168); roi = await get_roi_report(db, None)
-    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in roi if 'project' in r})}\nGas spent: ${sum(r.get('gas_spent_usd',0) for r in roi):.2f}"
+    from backend.reports.gas_spend import get_gas_spend_report
+    logs = await get_activity_log(db, hours=168); spend = await get_gas_spend_report(db, None)
+    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in spend if 'project' in r})}\nGas spent: ${sum(r.get('gas_spent_usd',0) for r in spend):.2f}"
 
 async def handle_report_snapshot(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"

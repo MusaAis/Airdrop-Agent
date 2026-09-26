@@ -4,6 +4,24 @@ from backend.telegram.whitelist import is_whitelisted
 logger = logging.getLogger("airdrop.tg.ai")
 
 
+async def handle_ai_autonomy_off(user_id, args, db, confirmation=None):
+    if not is_whitelisted(user_id): return "⛔ Unauthorized"
+    from backend.core.kill_switch import set_ai_autonomy_paused
+    set_ai_autonomy_paused(True)
+    return (
+        "🧊 AI autonomy frozen. The AI-managed task/wallet engine will not make "
+        "any autonomous changes until /ai_autonomy_on. Normal task execution "
+        "and manual commands are unaffected."
+    )
+
+
+async def handle_ai_autonomy_on(user_id, args, db, confirmation=None):
+    if not is_whitelisted(user_id): return "⛔ Unauthorized"
+    from backend.core.kill_switch import set_ai_autonomy_paused
+    set_ai_autonomy_paused(False)
+    return "✅ AI autonomy resumed. The AI-managed task/wallet engine may act autonomously again."
+
+
 async def handle_ai_log(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     n = int(args[0]) if args else 10

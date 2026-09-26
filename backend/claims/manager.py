@@ -160,62 +160,31 @@ async def scan_claimable_airdrops(db: AsyncSession) -> List[dict]:
     return claimable
 
 
-async def auto_claim_if_below_threshold(
+async def notify_claimable(
     wallet: Wallet,
     project: Project,
-    contract_address: str,
-    chain,
-    raw_amount: int,
     usd_estimate: float,
     db: AsyncSession,
-) -> bool:
+) -> None:
     """
-    Execute claim transaction if value is below auto_claim_threshold_usd.
-    Notifies Telegram either way.
+    Notify that a claimable position was found. Claiming is always a manual,
+    deliberate action via /claim_trigger — auto-execution was removed (see
+    PLAN.md §3): the previous auto_claim_if_below_threshold() executed a
+    claim transaction automatically for anything under a USD threshold, with
+    no human in the loop. It was also, in practice, dead code — nothing ever
+    called it, since scan results were never wired into it.
     """
-    threshold = project.auto_claim_threshold_usd or 50.0
+    await create_and_send_alert(
+        type="claim_pending",
+        severity="info",
+        message=(
+            f"💰 *Claimable position found*\n"
+            f"Project: {project.name}\n"
+            f"Wallet: `{wallet.address[:10]}...`\n"
+            f"Amount: ~${usd_estimate:.2f} USD\n"
+            f"Use `/claim_trigger {wallet.id} {project.id}` to claim."
+        ),
+        wallet_id=wallet.id,
+        project_id=project.id,
+    )
 
-    if usd_estimate > threshold:
-        await create_and_send_alert(
-            type="claim_pending",
-            severity="warning",
-            message=(
-                f"💰 *High-value claim ready!*\n"
-                f"Project: {project.name}\n"
-                f"Wallet: `{wallet.address[:10]}...`\n"
-                f"Amount: ~${usd_estimate:.2f} USD\n"
-                f"Use `/claim_trigger {wallet.id} {project.id}` to claim manually."
-            ),
-            wallet_id=wallet.id,
-            project_id=project.id,
-        )
-        return False
-
-    # Auto-claim
-    try:
-        from backend.tasks.claim_rewards import execute_claim
-        success = await execute_claim(wallet, chain, contract_address, db)
-        if success:
-            await create_and_send_alert(
-                type="claim_auto",
-                severity="info",
-                message=(
-                    f"✅ *Auto-claimed!*\n"
-                    f"Project: {project.name}\n"
-                    f"Wallet: `{wallet.address[:10]}...`\n"
-                    f"Value: ~${usd_estimate:.2f} USD"
-                ),
-                wallet_id=wallet.id,
-                project_id=project.id,
-            )
-        return success
-    except Exception as e:
-        logger.error(f"Auto-claim failed: {e}")
-        await create_and_send_alert(
-            type="tx_failed",
-            severity="warning",
-            message=f"⚠️ Auto-claim failed for {project.name} / {wallet.address[:10]}...: {e}",
-            wallet_id=wallet.id,
-            project_id=project.id,
-        )
-        return False

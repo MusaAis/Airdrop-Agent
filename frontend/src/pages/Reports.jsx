@@ -5,7 +5,7 @@ import { Card, EmptyState } from '../components/ui'
 
 const REPORT_TYPES = [
   { key: 'eligibility', label: 'Eligibility' },
-  { key: 'roi', label: 'ROI' },
+  { key: 'gas-spend', label: 'Gas spend' },
   { key: 'daily-progress', label: 'Daily progress' },
   { key: 'gas', label: 'Gas spend' },
   { key: 'sybil', label: 'Sybil risk' },
