@@ -1,21 +1,29 @@
 """
 APScheduler setup for all periodic background jobs:
 - Faucet auto-trigger (every 30 minutes)
-- Discovery scan (every 6 hours)
-- Sybil re-scoring (every 12 hours)
+- Sybil re-scoring (randomized 6-18h interval, re-rolled each cycle)
 - Log archival (weekly)
 - Daily summary Telegram report (every day at 08:00 UTC)
 - Gas history sampling (every 10 minutes)
 - Contract upgrade check (every 4 hours)
-- DB backup trigger (every night at 02:00 UTC)
+
+Discovery scanning and encrypted DB backups were removed (see PLAN.md).
 """
 
 import logging
+import random
+from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 logger = logging.getLogger("airdrop.scheduler")
+
+# Sybil re-score runs on a randomized interval instead of a fixed one, so the
+# timing itself doesn't become a predictable pattern. Re-rolled every cycle.
+SYBIL_RESCORE_MIN_HOURS = 6
+SYBIL_RESCORE_MAX_HOURS = 18
 
 _scheduler: AsyncIOScheduler = None
 
@@ -56,44 +64,13 @@ async def _run_faucet_check():
         logger.error(f"Faucet scheduler error: {e}")
 
 
-async def _run_discovery():
-    from backend.database import async_session
-    from backend.models import DiscoveryRun
-    async with async_session() as db:
-        run = DiscoveryRun(trigger="scheduled", status="running")
-        db.add(run)
-        await db.commit()
-        await db.refresh(run)
-    try:
-        from backend.discovery.sources import defillama, cryptorank, airdrops_io, twitter, rootdata, l2beat
-        from backend.discovery.processor import process_discovery_results
-        import asyncio as _asyncio
-        raw = await _asyncio.gather(
-            defillama.scrape(), cryptorank.scrape(), airdrops_io.scrape(),
-            twitter.scrape(), rootdata.scrape(), l2beat.scrape(),
-            return_exceptions=True
-        )
-        results = [item for batch in raw if isinstance(batch, list) for item in batch]
-        validated_count = await process_discovery_results(results)
-        logger.info(f"Discovery scan complete: {len(results)} raw projects found")
-        async with async_session() as db:
-            run = await db.get(DiscoveryRun, run.id)
-            run.finished_at = datetime.now(timezone.utc)
-            run.status = "success"
-            run.sources_scraped = 6
-            run.raw_results_found = len(results)
-            run.new_projects_validated = validated_count if isinstance(validated_count, int) else None
-            await db.commit()
-    except Exception as e:
-        logger.error(f"Discovery scheduler error: {e}")
-        async with async_session() as db:
-            run = await db.get(DiscoveryRun, run.id)
-            run.finished_at = datetime.now(timezone.utc)
-            run.status = "failed"
-            run.error_message = str(e)
-            await db.commit()
-
 async def _run_sybil_rescore():
+    """
+    Run one Sybil re-score cycle, then immediately schedule the next one at a
+    freshly randomized 6-18h delay (see PLAN.md §6). Self-rescheduling via a
+    one-shot DateTrigger instead of a fixed IntervalTrigger, so the interval
+    itself changes every cycle rather than repeating on a predictable clock.
+    """
     try:
         from backend.database import async_session
         from backend.wallet.sybil_detector import compute_wallet_correlations
@@ -119,6 +96,24 @@ async def _run_sybil_rescore():
                     )
     except Exception as e:
         logger.error(f"Sybil rescore error: {e}")
+    finally:
+        _schedule_next_sybil_rescore()
+
+
+def _schedule_next_sybil_rescore():
+    """Pick a fresh random delay (6-18h) and schedule the next sybil re-score
+    run as a one-shot job. Called once at startup and again at the end of
+    every run, so the job perpetually re-schedules itself."""
+    sched = get_scheduler()
+    delay_hours = random.uniform(SYBIL_RESCORE_MIN_HOURS, SYBIL_RESCORE_MAX_HOURS)
+    run_at = datetime.now(timezone.utc) + timedelta(hours=delay_hours)
+    sched.add_job(
+        _run_sybil_rescore,
+        DateTrigger(run_date=run_at),
+        id="sybil_rescore",
+        replace_existing=True,
+    )
+    logger.info(f"Next sybil re-score scheduled in {delay_hours:.1f}h (at {run_at.isoformat()})")
 
 async def _run_log_archival():
     try:
@@ -166,34 +161,23 @@ async def _run_contract_check():
         logger.error(f"Contract check error: {e}")
 
 
-async def _run_backup():
-    try:
-        from backend.security.backup import encrypted_backup
-        from backend.config import DATABASE_URL
-        import os
-        db_path = DATABASE_URL.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
-        if not db_path.startswith("/"):
-            db_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), db_path)
-        await encrypted_backup(db_path)
-    except Exception as e:
-        logger.error(f"Backup error: {e}")
-
-
 def start_scheduler():
     sched = get_scheduler()
 
     sched.add_job(_run_faucet_check,   IntervalTrigger(minutes=30),  id="faucet_check",    replace_existing=True)
-    sched.add_job(_run_discovery,      IntervalTrigger(hours=6),     id="discovery",        replace_existing=True)
-    sched.add_job(_run_sybil_rescore,  IntervalTrigger(hours=12),    id="sybil_rescore",    replace_existing=True)
     sched.add_job(_run_log_archival,   CronTrigger(day_of_week="sun", hour=3), id="log_archival", replace_existing=True)
     sched.add_job(_run_daily_summary,  CronTrigger(hour=8, minute=0), id="daily_summary",   replace_existing=True)
     sched.add_job(_run_gas_sample,     IntervalTrigger(minutes=10),  id="gas_sample",       replace_existing=True)
     sched.add_job(_run_contract_check, IntervalTrigger(hours=4),     id="contract_check",   replace_existing=True)
-    sched.add_job(_run_backup,         CronTrigger(hour=2, minute=0), id="db_backup",        replace_existing=True)
 
     if not sched.running:
         sched.start()
         logger.info("APScheduler started with all jobs")
+
+    # Sybil re-score is self-rescheduling (randomized interval) rather than a
+    # fixed IntervalTrigger — kick off its first cycle here.
+    _schedule_next_sybil_rescore()
+
     return sched
 
 

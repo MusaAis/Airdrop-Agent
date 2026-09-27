@@ -21,10 +21,6 @@ AI_MAX_TOKENS: int = int(os.getenv("AI_MAX_TOKENS", "4096"))
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 ALLOWED_USER_IDS = json.loads(os.getenv("TELEGRAM_ALLOWED_USER_IDS", "[]"))
 
-OCI_CONFIG_FILE: str = os.getenv("OCI_CONFIG_FILE", "~/.oci/config")
-OCI_BUCKET_NAME: str = os.getenv("OCI_BUCKET_NAME", "")
-OCI_NAMESPACE: str = os.getenv("OCI_NAMESPACE", "")
-
 # IP whitelist parsing
 raw_ips = os.getenv("ALLOWED_IPS", "127.0.0.1,::1")
 ALLOWED_IPS: List[str] = [ip.strip() for ip in raw_ips.split(",") if ip.strip()]
@@ -36,7 +32,6 @@ MAX_WORKER_SLOTS: int = int(os.getenv("MAX_WORKER_SLOTS", "4"))
 MEMORY_ALERT_THRESHOLD_PCT: float = float(os.getenv("MEMORY_ALERT_THRESHOLD_PCT", "82"))
 
 LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-BACKUP_SCHEDULE_HOUR: int = int(os.getenv("BACKUP_SCHEDULE_HOUR", "2"))
 DRY_RUN_MODE: bool = os.getenv("DRY_RUN_MODE", "false").lower() == "true"
 
 MASTER_PASSWORD: str = os.getenv("MASTER_PASSWORD", "")

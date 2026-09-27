@@ -4,6 +4,7 @@ airdrop.db-shm
 airdrop.db-wal
 *.log
 cat.save
+backend/backups/
 
 # Python
 __pycache__/

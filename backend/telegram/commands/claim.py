@@ -42,23 +42,6 @@ async def handle_claim_eligible(user_id, args, db, confirmation=None):
     return "\n".join(lines)
 
 
-async def handle_claim_value(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    pid = int(args[0]) if args else None
-    from backend.models import Project
-    from sqlalchemy import select
-    if pid:
-        project = await db.get(Project, pid)
-        if not project: return f"Project {pid} not found."
-        projects = [project]
-    else:
-        projects = (await db.execute(select(Project).where(Project.status == "active"))).scalars().all()
-    lines = ["💰 Estimated Claim Values (requires manual verification):"]
-    for p in projects:
-        lines.append(f"\n{p.name}: ROI estimation requires AI analysis — use /ai_validate {p.id}")
-    return "\n".join(lines)
-
-
 async def handle_claim_trigger(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     if len(args) < 2: return "Usage: /claim_trigger <wallet_id> <project_id>"
@@ -69,30 +52,6 @@ async def handle_claim_trigger(user_id, args, db, confirmation=None):
         "3. Wallet has claimable tokens\n\n"
         "Add the claim contract via /project_add and configure via dashboard."
     )
-
-
-async def handle_claim_set_threshold(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    if not args: return "Usage: /claim_set_threshold <usd>"
-    try:
-        threshold = float(args[0])
-        from backend.models import Project
-        from sqlalchemy import select, update
-        await db.execute(update(Project).values(auto_claim_threshold_usd=threshold))
-        await db.commit()
-        return f"✅ Auto-claim threshold set to ${threshold:.2f} for all projects."
-    except Exception as e:
-        return f"❌ Error: {e}"
-
-
-async def handle_claim_auto_on(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    return "✅ Auto-claim enabled. Claims below threshold will execute automatically when claim contracts are configured."
-
-
-async def handle_claim_auto_off(user_id, args, db, confirmation=None):
-    if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    return "✅ Auto-claim disabled. All claims will require manual approval."
 
 
 async def handle_claim_pending(user_id, args, db, confirmation=None):

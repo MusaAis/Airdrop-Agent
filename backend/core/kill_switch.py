@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 # instead of importing the raw name to get the live value.
 _EMERGENCY_STOP: bool = False
 _DRY_RUN: bool = False
+_AI_AUTONOMY_PAUSED: bool = False
 
 # Legacy name aliases kept for backward-compat with any direct assignments
 EMERGENCY_STOP = False
@@ -20,6 +21,22 @@ def is_emergency_stop() -> bool:
 def is_dry_run() -> bool:
     """Live getter — always reflects the current state."""
     return _DRY_RUN
+
+
+def is_ai_autonomy_paused() -> bool:
+    """
+    Live getter for the AI-autonomy freeze (PLAN.md §5.3/§7). When True, the
+    AI-managed task/wallet engine must not make any autonomous change —
+    pausing tasks, adjusting wallet settings, reprioritizing the queue, etc.
+    Independent of the main kill switch: this only affects AI decisions, not
+    the agent's normal task execution.
+    """
+    return _AI_AUTONOMY_PAUSED
+
+
+def set_ai_autonomy_paused(value: bool) -> None:
+    global _AI_AUTONOMY_PAUSED
+    _AI_AUTONOMY_PAUSED = value
 
 
 def set_dry_run(value: bool) -> None:
