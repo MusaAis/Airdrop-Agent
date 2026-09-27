@@ -1,8 +1,22 @@
 # Airdrop-Agent — Project Plan
 
-**Status:** Planning complete, execution not yet started
+**Status:** Phase 1 complete and deployed (backend live on Oracle Cloud server, frontend live on Vercel). Phase 2 onward not yet started.
 **Environment:** Testnet only — no mainnet deployment
-**Last updated:** 2026-09-25 (created)
+**Last updated:** 2026-09-27 (Phase 1 shipped)
+
+## 0. Phase 1 completion notes
+
+Phase 1 (§3 removals + §4 Telegram trim) is done and deployed as of 2026-09-27:
+- Backend: discovery system, ROI estimator, backup system, and auto-claim execution all removed; Telegram cut to the curated ~45-command set; `bot.py` rewritten in full; `AiLog.jsx` and `Reports.jsx` updated on the frontend. `reports/roi.py` was renamed to `reports/gas_spend.py` (factual gas-cost reporting, no AI guess) — any future work referencing "ROI report" should use this instead.
+- New in this phase: `is_ai_autonomy_paused()` / `set_ai_autonomy_paused()` in `backend/core/kill_switch.py`, plus `ai_autonomy_off`/`ai_autonomy_on` Telegram commands (§7's off-switch decision) — this is scaffolding only, the actual autonomous engine from §5.3 has not been built yet.
+- Sybil re-score now self-reschedules with a randomized 6-18h delay (was fixed 12h) — see `_schedule_next_sybil_rescore()` in `backend/core/scheduler.py`.
+- `requirements.txt` cleaned: added `pyotp`/`qrcode` (were missing despite being required by existing TOTP code — pre-existing bug, now fixed), removed `beautifulsoup4`/`lxml`/`oci` (only used by removed discovery/backup code).
+- Deployed: pushed to `github.com/MusaAis/Airdrop-Agent` `main` branch, pulled and restarted on the Oracle Cloud server (systemd service `airdrop-agent`), frontend deployed to Vercel production (`airdrop-agent-musaais.vercel.app`).
+- Known pre-existing item, unrelated to this phase: `backend/main.py` has `setup_middleware(app)` commented out, meaning `IPWhitelistMiddleware` is not currently active — worth a look given the server's public-internet exposure (log noise from scanning bots was observed during deployment, ordinary background noise but a reminder the middleware is off).
+
+Next up: Phase 3 (manual project add, §5.5) per the phase order in §9 — Phase 2 was folded into Phase 1's commit already.
+
+
 **Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase.
 
 This is the reference document for the Airdrop-Agent rebuild: what the system does today, what's being removed and why, what's being kept, what's being improved, what's being built new, and where the project is headed after that. Use this as the source of truth during the build — not the chat history.
@@ -225,6 +239,8 @@ Ideas worth considering after the current phase, not committed to yet:
 - **Mobile push notifications beyond Telegram** — if the website is meant for broader use, Telegram-only alerts limit it to Musa; a simple in-app notification center already exists (`Notifications.jsx`) and could gain a browser-push or email fallback.
 - **Mainnet readiness pass (if ever needed)** — the project runs testnet-only for now, which is why §5.3's guardrails are set loose. If mainnet ever comes into scope later, everything in §5.3 needs a second pass first: tighter rate limits, a stricter agreement-score gate, and probably a required-human-approval mode as the default rather than an option.
 - **Rate-limit / cooldown visualization** — a single dashboard view showing every wallet's current cooldown/active-hours/daily-target state at a glance, since this data exists (`WalletSettings`, `TaskDailyProgress`) but is currently only visible per-wallet on request.
+- **Real-time AIs analysis & improvements & validation & reports/alerts and so on/etc**
+- **and a lots of featurs thats i for forgot to mentions & your allowed to suggest for new features thats you find is useful for this project, including now or for the future roadmap, thank you**
 
 ---
 
@@ -236,6 +252,6 @@ Ideas worth considering after the current phase, not committed to yet:
 4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2)
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6
 6. **Phase 6 — New feature: AI-managed tasks/wallets** (§5.3) — only after §7 open questions are answered
-7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6)
+7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more.
 
 This grouping is a suggestion, not a commitment — order can change based on what Musa wants tackled first once execution begins.
