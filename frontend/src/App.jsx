@@ -10,6 +10,7 @@ import Balances from './pages/Balances'
 import Chains from './pages/Chains'
 import Tasks from './pages/Tasks'
 import Projects from './pages/Projects'
+import AddProject from './pages/AddProject'
 import Logs from './pages/Logs'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
@@ -24,7 +25,8 @@ import './index.css'
 
 const PAGE_TITLES = {
   '/': 'Dashboard', '/wallets': 'Wallets', '/balances': 'Balances', '/chains': 'Chains',
-  '/tasks': 'Task Configurations', '/projects': 'Projects', '/logs': 'Activity Log',
+  '/tasks': 'Task Configurations', '/projects': 'Projects', '/projects/new': 'Add Project',
+  '/logs': 'Activity Log',
   '/reports': 'Reports', '/faucets': 'Faucets', '/proxies': 'Proxies',
   '/settings': 'Settings', '/claims': 'Claims', '/ai-log': 'AI Validation Log',
   '/sybil': 'Sybil Risk', '/snapshot': 'Snapshot Calendar', '/notifications': 'Notifications',
@@ -50,6 +52,7 @@ function Shell({ token, logout }) {
             <Route path="/chains" element={<Chains token={token} />} />
             <Route path="/tasks" element={<Tasks token={token} />} />
             <Route path="/projects" element={<Projects token={token} />} />
+            <Route path="/projects/new" element={<AddProject token={token} />} />
             <Route path="/logs" element={<Logs token={token} />} />
             <Route path="/reports" element={<Reports token={token} />} />
             <Route path="/faucets" element={<Faucets token={token} />} />

@@ -5,6 +5,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 from backend.config import TELEGRAM_BOT_TOKEN
 from backend.telegram.whitelist import is_whitelisted
 from backend.telegram.nl_parser import parse_natural_language
+from backend.telegram.project_wizard import has_active_wizard, handle_wizard_reply
 from backend.telegram.commands.wallet import (
     handle_wallet_create, handle_wallet_list, handle_wallet_status,
     handle_wallet_balance, handle_wallet_pause, handle_wallet_resume,
@@ -473,10 +474,23 @@ async def fallback_nl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_whitelisted(update.effective_user.id):
         return
     user_id = update.effective_user.id
-    raw_text = update.message.text.strip().lower()
+    raw_text = update.message.text.strip()
+
+    # Guided /project_add wizard takes priority over both the pending-
+    # confirmation flow and NL parsing while it's active for this user, so a
+    # wizard reply like "yes"/"no"/"skip"/"confirm" is never mistaken for a
+    # destructive-action confirmation (or vice versa).
+    if has_active_wizard(user_id):
+        from backend.database import async_session
+        async with async_session() as db:
+            resp = await handle_wizard_reply(user_id, raw_text, db)
+        await update.message.reply_text(resp or "✅ Done.")
+        return
+
+    raw_text_lower = raw_text.lower()
 
     # Handle pending confirmation replies
-    if raw_text == "confirm":
+    if raw_text_lower == "confirm":
         pending = _pop_pending(user_id)
         if not pending:
             await update.message.reply_text("⚠️ Nothing to confirm (or confirmation expired).")
@@ -486,7 +500,7 @@ async def fallback_nl(update: Update, context: ContextTypes.DEFAULT_TYPE):
             resp = await dispatch_action(user_id, pending["action"], pending["params"], db)
         await update.message.reply_text(resp or "✅ Done.")
         return
-    if raw_text == "cancel":
+    if raw_text_lower == "cancel":
         _cancel_pending(user_id)
         await update.message.reply_text("❌ Action cancelled.")
         return
@@ -670,7 +684,7 @@ async def start_bot():
         ("wallet_health",       "Wallet health score"),
         ("wallet_failing",      "Show failing wallets"),
         ("project_list",        "List all projects"),
-        ("project_add",         "Add a project"),
+        ("project_add",         "Add a project (guided setup)"),
         ("project_status",      "Project eligibility"),
         ("project_approve",     "AI-review and activate a project"),
         ("task_list",           "List task configs"),

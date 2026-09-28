@@ -13,7 +13,15 @@ async def handle_project_list(user_id, args, db, confirmation=None):
 
 async def handle_project_add(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    if len(args)<2: return "Usage: project.add <name> <type (ecosystem/dapp)>"
+    # Guided flow (PLAN.md §5.5): with no args, start the multi-step wizard
+    # instead of requiring "project.add <name> <type>" up front. The old
+    # two-arg path is kept for natural-language / scripted callers that
+    # already have both values resolved (e.g. "add project X as a dapp").
+    if not args:
+        from backend.telegram.project_wizard import start_wizard
+        return start_wizard(user_id)
+    if len(args) < 2:
+        return "Usage: project.add <name> <type (ecosystem/dapp)>\nOr just /project_add with no args for guided setup."
     name, ptype = args[0], args[1]
     project = await create_project(db, name=name, type=ptype)
     return f"✅ Project {project.name} added (ID:{project.id})"
@@ -66,7 +74,7 @@ async def handle_project_approve(user_id, args, db, confirmation=None):
     from sqlalchemy import select
     from backend.models import ProjectCriteria
     from backend.ai.orchestrator import dual_ai_validate
-    from backend.ai.prompts import prompt_risk, prompt_roi
+    from backend.ai.prompts import prompt_risk
 
     criteria = (await db.execute(select(ProjectCriteria).where(ProjectCriteria.project_id == project.id))).scalars().all()
     project_blob = (
@@ -81,13 +89,6 @@ async def handle_project_approve(user_id, args, db, confirmation=None):
         user_prompt=prompt_risk(project_blob),
         db=db,
     )
-    roi_validation = await dual_ai_validate(
-        task_type="roi",
-        system_prompt="You are a crypto analyst estimating airdrop value. Be conservative.",
-        user_prompt=prompt_roi(project_blob),
-        db=db,
-    )
-
     recommendation = (risk_validation.final_decision or {}).get("recommendation", "").upper()
     project.ai_confidence = risk_validation.agreement_score
     from datetime import datetime, timezone
@@ -106,7 +107,7 @@ async def handle_project_approve(user_id, args, db, confirmation=None):
     return (
         f"✅ '{project.name}' approved and set active. "
         f"Risk: {recommendation or 'reviewed'} ({risk_validation.agreement_score}% agreement). "
-        f"ROI logged — see /ai_log for the estimate."
+        f"See /ai_log for the full risk review."
     )
 
 async def handle_project_reject(user_id, args, db, confirmation=None):

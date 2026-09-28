@@ -14,26 +14,10 @@ Phase 1 (§3 removals + §4 Telegram trim) is done and deployed as of 2026-09-27
 - Deployed: pushed to `github.com/MusaAis/Airdrop-Agent` `main` branch, pulled and restarted on the Oracle Cloud server (systemd service `airdrop-agent`), frontend deployed to Vercel production (`airdrop-agent-musaais.vercel.app`).
 - Known pre-existing item, unrelated to this phase: `backend/main.py` has `setup_middleware(app)` commented out, meaning `IPWhitelistMiddleware` is not currently active — worth a look given the server's public-internet exposure (log noise from scanning bots was observed during deployment, ordinary background noise but a reminder the middleware is off).
 
-## 0.3 Phase 3 completion notes
-Phase 3 (manual project add, §5.5) per the phase order in §9 — Phase 2 was folded into Phase 1's commit already.
-- AddProject.jsx: the criteria step could never be reached, so the AI-draft feature was dead. The steps are now Details → Chains → Socials → Task → Review → Criteria. Criteria comes after the project is created, because the draft endpoint needs a project ID.
-- AddProject.jsx: if creating the task failed after the project was created, retrying would have made a duplicate project. It now reuses the project it already created.
-- commands/project.py: handle_project_approve still imported prompt_roi, which Phase 1 deleted from prompts.py. /project_approve would have crashed with an ImportError. I removed the ROI call and its "ROI logged" message.
-- Telegram wizard: it promised an AI draft it never ran. It now saves the docs URL into the project's notes and points you to /projects/new?project=ID on the dashboard to draft criteria.
-- projects.py: the criteria-draft endpoint fetches a URL you supply from your server. I added a check that refuses non-http(s) URLs and private, internal or cloud-metadata addresses, and it strips HTML tags before sending the text to the AI.
-- We also added a "Draft criteria" link on each row of the projects table, so a project added/created from Telegram can get its criteria drafted.
-**all edited/new file in phase 3**
-- backend/telegram/project_wizard.py	new
-- backend/telegram/commands/project.py	replace
-- backend/telegram/bot.py	        replace
-- backend/api/routes/projects.py	replace
-- frontend/src/pages/AddProject.jsx	new
-- frontend/src/pages/Projects.jsx	replace
-- frontend/src/App.jsx	                replace
+Next up: Phase 3 (manual project add, §5.5) per the phase order in §9 — Phase 2 was folded into Phase 1's commit already.
 
-Next up: Phase 4: conversation memory and fuzzy entity resolution for the natural-language parser, plus AI-written report summaries.
 
-**Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase(with short description of each phase).
+**Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase.
 
 This is the reference document for the Airdrop-Agent rebuild: what the system does today, what's being removed and why, what's being kept, what's being improved, what's being built new, and where the project is headed after that. Use this as the source of truth during the build — not the chat history.
 
@@ -253,10 +237,11 @@ Ideas worth considering after the current phase, not committed to yet:
 - **Per-project custom ABI storage** — `ProjectContract.abi_fragment` exists in the schema but generic task types (`generic.py`) still take raw hex `data` from config; a small ABI-aware builder would make manual project setup much friendlier, tying directly into §5.5.
 - **Historical gas-cost vs actual-received tracking** — now that ROI estimation (AI-guessed) is gone, a *factual* ROI view (gas spent vs tokens actually received, once claims are confirmed) would be genuinely useful and requires no AI guessing — just linking `claim_trigger` results back to `gas_cost_usd` per project.
 - **Mobile push notifications beyond Telegram** — if the website is meant for broader use, Telegram-only alerts limit it to Musa; a simple in-app notification center already exists (`Notifications.jsx`) and could gain a browser-push or email fallback.
+- **Mobile apk/app if possible** - simple applications
 - **Mainnet readiness pass (if ever needed)** — the project runs testnet-only for now, which is why §5.3's guardrails are set loose. If mainnet ever comes into scope later, everything in §5.3 needs a second pass first: tighter rate limits, a stricter agreement-score gate, and probably a required-human-approval mode as the default rather than an option.
 - **Rate-limit / cooldown visualization** — a single dashboard view showing every wallet's current cooldown/active-hours/daily-target state at a glance, since this data exists (`WalletSettings`, `TaskDailyProgress`) but is currently only visible per-wallet on request.
-- **Real-time AIs analysis & improvements & validation & reports/alerts and so on/etc**
-- **and a lots of featurs thats i for forgot to mentions & your allowed to suggest for new features thats you find is useful for this project, including now or for the future roadmap, thank you**
+- **Real-time AIs analysis, reporting, and many others thats i forgot and you found them useful**
+- **and many others features thats i will discorver next or you can suggest great/good features thats thats project miss/misex, your welcome any time**
 
 ---
 
@@ -268,8 +253,6 @@ Ideas worth considering after the current phase, not committed to yet:
 4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2)
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6
 6. **Phase 6 — New feature: AI-managed tasks/wallets** (§5.3) — only after §7 open questions are answered
-7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more.
-8. **Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. 
-9. **Phase 8 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, security.md and the rest.
+7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & improvement for the website for better UI/UX
 
 This grouping is a suggestion, not a commitment — order can change based on what Musa wants tackled first once execution begins.

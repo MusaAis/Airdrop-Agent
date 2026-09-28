@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import api from '../api'
 import { Card, Badge, EmptyState } from '../components/ui'
 
@@ -19,7 +20,17 @@ export default function Projects() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <Card title="Add project">
+      <Card
+        title="Add project"
+        action={
+          <Link to="/projects/new" style={{ fontSize: 12.5, fontWeight: 600 }}>
+            Guided setup →
+          </Link>
+        }
+      >
+        <p style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: -8, marginBottom: 14 }}>
+          Quick add below (name, type and chains only), or use guided setup for tasks and AI-drafted criteria.
+        </p>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
           <input placeholder="Name" value={newProj.name} onChange={e => setNewProj({ ...newProj, name: e.target.value })} />
           <select value={newProj.type} onChange={e => setNewProj({ ...newProj, type: e.target.value })}>
@@ -45,7 +56,7 @@ export default function Projects() {
         )}
         {loaded && projects.length > 0 && (
           <div className="table-scroll"><table>
-            <thead><tr><th>Name</th><th>Type</th><th>Priority</th><th>Status</th></tr></thead>
+            <thead><tr><th>Name</th><th>Type</th><th>Priority</th><th>Status</th><th></th></tr></thead>
             <tbody>
               {projects.map(p => (
                 <tr key={p.id}>
@@ -53,6 +64,9 @@ export default function Projects() {
                   <td><span className="badge neutral"><span className="badge-dot" />{p.type}</span></td>
                   <td className="mono">{p.priority}</td>
                   <td><Badge status={p.status === 'active'}>{p.status}</Badge></td>
+                  <td style={{ textAlign: 'right' }}>
+                    <Link to={`/projects/new?project=${p.id}`} style={{ fontSize: 12.5 }}>Draft criteria</Link>
+                  </td>
                 </tr>
               ))}
             </tbody>

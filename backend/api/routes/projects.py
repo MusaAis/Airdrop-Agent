@@ -1,3 +1,9 @@
+import asyncio
+import ipaddress
+import re
+from urllib.parse import urlparse
+
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from backend.security.auth import verify_token
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,6 +14,9 @@ from backend.projects.manager import (
     create_task_config, list_task_configs, get_task_config, update_task_config, delete_task_config
 )
 from backend.projects.eligibility import compute_eligibility
+from backend.projects.criteria import list_criteria, upsert_criteria_from_ai
+from backend.ai.orchestrator import dual_ai_validate
+from backend.ai.prompts import prompt_criteria
 from backend.wallet.manager import get_wallet
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any
@@ -73,6 +82,13 @@ class TaskConfigUpdate(BaseModel):
     daily_tx_max: Optional[int] = None
     bidirectional: Optional[bool] = None
     # ... other optional fields
+
+class CriteriaDraftRequest(BaseModel):
+    docs_url: Optional[str] = None
+    docs_text: Optional[str] = None  # if the user pastes text instead of a URL
+
+class CriteriaAcceptRequest(BaseModel):
+    criteria: List[Dict[str, Any]]  # the (possibly user-edited) draft items to save
 
 @router.get("/")
 async def list_projects_route(_user: dict = Depends(verify_token), status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
@@ -145,3 +161,99 @@ async def wallet_eligibility(project_id: int, wallet_id: int, _user: dict = Depe
         raise HTTPException(404, "Wallet not found")
     result = await compute_eligibility(db, project_id, wallet)
     return result
+
+
+# ── AI-drafted eligibility criteria (PLAN.md §5.5) ──────────────────────────
+
+async def _assert_public_http_url(url: str) -> None:
+    """
+    Reject anything that isn't a plain http(s) URL pointing at a public host.
+    The draft endpoint makes the server fetch a user-supplied URL, so without
+    this it could be aimed at localhost, the cloud metadata service
+    (169.254.169.254) or other internal addresses.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise HTTPException(400, "docs_url must be a valid http(s) URL")
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(parsed.hostname, None)
+    except Exception:
+        raise HTTPException(400, "Could not resolve docs_url host")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            raise HTTPException(400, "docs_url must point to a public host")
+
+
+def _html_to_text(html: str) -> str:
+    """Crude tag stripper so the AI prompt isn't mostly markup."""
+    html = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
+    text = re.sub(r"(?s)<[^>]+>", " ", html)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+@router.post("/{project_id}/criteria/draft")
+async def draft_project_criteria(
+    project_id: int, data: CriteriaDraftRequest,
+    _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)
+):
+    """
+    AI-drafts eligibility criteria for review — never saved automatically.
+    The human must separately POST to /criteria/accept to persist anything
+    from the draft, consistent with the "AI never auto-creates" boundary in
+    PLAN.md §5.3.
+    """
+    project = await get_project(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if not data.docs_url and not data.docs_text:
+        raise HTTPException(400, "Provide docs_url or docs_text")
+
+    doc_content = data.docs_text
+    if data.docs_url and not doc_content:
+        await _assert_public_http_url(data.docs_url)
+        try:
+            # follow_redirects stays off (httpx default) so a redirect can't
+            # bounce the request to an internal address after the check above.
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.get(data.docs_url, headers={"User-Agent": "AirdropAgent/1.0"})
+                resp.raise_for_status()
+                doc_content = _html_to_text(resp.text)[:20000]
+        except Exception as e:
+            raise HTTPException(400, f"Could not fetch docs_url: {e}")
+
+    existing = await list_criteria(db, project_id)
+    previous = [c.description for c in existing]
+
+    validation = await dual_ai_validate(
+        task_type="criteria",
+        system_prompt="You are extracting precise airdrop eligibility criteria. Accuracy is critical — this drives real transactions.",
+        user_prompt=prompt_criteria(doc_content, str(previous)),
+        db=db,
+    )
+    decision = validation.final_decision or {}
+    return {
+        "validation_id": validation.id,
+        "agreement_score": validation.agreement_score,
+        "requires_human": validation.requires_human,
+        "draft_criteria": decision.get("criteria", []),
+        "information_gaps": decision.get("information_gaps", []),
+        "unconfirmed_rumors": decision.get("unconfirmed_rumors", []),
+    }
+
+
+@router.post("/{project_id}/criteria/accept")
+async def accept_project_criteria(
+    project_id: int, data: CriteriaAcceptRequest,
+    _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)
+):
+    """
+    Persist criteria the human has reviewed (and optionally edited) from a
+    prior /criteria/draft call. This is the only path that writes AI-drafted
+    criteria to the DB — draft() never does.
+    """
+    project = await get_project(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    added = await upsert_criteria_from_ai(db, project_id, data.criteria)
+    return {"message": f"Added {len(added)} criteria", "added_ids": [c.id for c in added]}
