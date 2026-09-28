@@ -264,7 +264,7 @@ Ideas worth considering after the current phase, not committed to yet:
 
 1. **Phase 1 — Removals:** discovery system, ROI estimator, backup system, auto-claim execution, Telegram command trim
 2. **Phase 2 — Kept-feature improvements:** Sybil re-score randomized interval, AI validation scope narrowing
-3. **Phase 3 — New feature: manual project add** (§5.5) — Telegram guided flow + website wizard
+3. **Phase 3 — New feature: manual project add** (§5.5) — Telegram guided flow + website wizard. **and i have forgot to a remove & edit projects in the project tab** - we need to add this when building **phase 4** edit/remove project in project tab
 4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2)
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6
 6. **Phase 6 — New feature: AI-managed tasks/wallets** (§5.3) — only after §7 open questions are answered
