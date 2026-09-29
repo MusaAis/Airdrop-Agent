@@ -29,6 +29,9 @@ async def create_and_send_alert(
         db.add(alert)
         await db.commit()
         await db.refresh(alert)
+        from backend.telegram.commands.alert import is_snoozed
+        if severity != "critical" and is_snoozed():
+            return  # row kept for the dashboard; Telegram push suppressed
         try:
             icon = {"critical": "🔴", "warning": "⚠️", "info": "ℹ️"}.get(severity, "📢")
             full_msg = f"{icon} *{type.upper().replace('_', ' ')}*\n{message}"
@@ -40,16 +43,6 @@ async def create_and_send_alert(
 
 
 async def send_daily_summary():
-    """
-    Full daily summary: tx stats, top wallets, eligibility, gas, upcoming
-    snapshots, plus (Phase 4) an AI-narrated interpretation appended to the
-    SAME message rather than sent separately. Rationale: this goes to one
-    recipient once a day — a second message would just be visual noise for
-    what is really one report, and it saves a round trip. If AI narration is
-    unavailable (both Gemini and Groq down), the message still sends with
-    just the factual section; the narrative line is simply omitted rather
-    than blocking the whole daily summary.
-    """
     try:
         now = datetime.now(timezone.utc)
         today = now.date().isoformat()
@@ -116,9 +109,6 @@ async def send_daily_summary():
                 f"  {total_projects} active protocols farming",
             ]
 
-            # Phase 4: AI narrative, appended to this same message rather
-            # than sent as a second one. Never let a narration failure block
-            # the factual summary above — wrapped independently.
             try:
                 from backend.reports.analyst import generate_daily_summary_narrative
                 summary_result = await generate_daily_summary_narrative(db, hours=24)

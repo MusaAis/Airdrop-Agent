@@ -7,12 +7,17 @@ const SEV_ICON  = { critical: '🔴', warning: '🟡', info: '🟢' }
 export default function Notifications({ token }) {
   const [alerts, setAlerts]  = useState([])
   const [filter, setFilter]  = useState('all')
+  const [snoozeUntil, setSnoozeUntil] = useState(null)
   const h = { Authorization: `Bearer ${token}` }
 
   const load = useCallback(async () => {
     try {
       const d = await fetch(`${API_BASE}/agent/alerts-list`, { headers: h }).then(r => r.json())
       setAlerts(Array.isArray(d) ? d : [])
+    } catch {}
+    try {
+      const s = await fetch(`${API_BASE}/agent/alerts/snooze`, { headers: h }).then(r => r.json())
+      setSnoozeUntil(s.snoozed ? s.until : null)
     } catch {}
   }, [token])
 
@@ -24,27 +29,48 @@ export default function Notifications({ token }) {
   const resolveAll = async () => {
     await fetch(`${API_BASE}/agent/alerts/resolve-all`, { method: 'POST', headers: h }); load()
   }
+  const snooze = async (minutes) => {
+    await fetch(`${API_BASE}/agent/alerts/snooze?minutes=${minutes}`, { method: 'POST', headers: h }); load()
+  }
+  const unsnooze = async () => {
+    await fetch(`${API_BASE}/agent/alerts/snooze`, { method: 'DELETE', headers: h }); load()
+  }
 
   const visible = alerts.filter(a => filter === 'all' || a.severity === filter || (filter === 'unresolved' && !a.resolved))
   const unresolved = alerts.filter(a => !a.resolved).length
 
   const card = { background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 10, padding: '13px 16px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }
+  const btn = { padding: '7px 14px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: 13 }
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
           <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>Notifications</h2>
           {unresolved > 0 && <span style={{ background: '#ef4444', color: '#fff', borderRadius: 99, padding: '2px 9px', fontSize: 12, fontWeight: 700 }}>{unresolved}</span>}
         </div>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button onClick={load} style={btn}>Refresh</button>
+          {unresolved > 0 && <button onClick={resolveAll} style={{ ...btn, background: 'var(--signal)', border: 'none', color: '#06151A', fontWeight: 600 }}>Resolve All</button>}
+        </div>
+      </div>
+
+      {/* Telegram snooze — critical alerts are always sent */}
+      <div style={{ ...card, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div style={{ fontSize: 13 }}>
+          {snoozeUntil
+            ? <>🔕 Telegram alerts snoozed until <strong>{new Date(snoozeUntil).toLocaleTimeString()}</strong> <span style={{ color: 'var(--text-secondary)' }}>(critical alerts still sent; everything is still recorded here)</span></>
+            : <>🔔 Telegram alerts active</>}
+        </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={load} style={{ padding: '7px 14px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: 13 }}>Refresh</button>
-          {unresolved > 0 && <button onClick={resolveAll} style={{ padding: '7px 14px', borderRadius: 8, background: 'var(--signal)', border: 'none', color: '#06151A', fontWeight: 600, cursor: 'pointer', fontSize: 13 }}>Resolve All</button>}
+          {snoozeUntil
+            ? <button onClick={unsnooze} style={btn}>Resume now</button>
+            : [30, 120, 480].map(m => <button key={m} onClick={() => snooze(m)} style={btn}>Snooze {m >= 60 ? `${m / 60}h` : `${m}m`}</button>)}
         </div>
       </div>
 
       {/* Filter tabs */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
         {['all','unresolved','critical','warning','info'].map(f => (
           <button key={f} onClick={() => setFilter(f)} style={{ padding: '6px 14px', borderRadius: 7, border: '1px solid var(--border)', background: filter === f ? 'var(--signal)' : 'var(--bg-elevated)', color: filter === f ? '#06151A' : 'var(--text)', fontWeight: filter === f ? 600 : 400, cursor: 'pointer', fontSize: 13, textTransform: 'capitalize' }}>{f}</button>
         ))}
@@ -60,7 +86,7 @@ export default function Notifications({ token }) {
                 <span style={{ fontWeight: 600, fontSize: 13 }}>{a.type?.replace(/_/g,' ')}</span>
                 {a.resolved && <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>resolved</span>}
               </div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>{a.message}</div>
+              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4, whiteSpace: 'pre-wrap' }}>{a.message}</div>
               <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{new Date(a.created_at).toLocaleString()}</div>
             </div>
             {!a.resolved && (

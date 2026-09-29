@@ -31,7 +31,65 @@ Phase 3 (manual project add, §5.5) per the phase order in §9 — Phase 2 was f
 - frontend/src/pages/Projects.jsx	replace
 - frontend/src/App.jsx	                replace
 
-Next up: Phase 4: conversation memory and fuzzy entity resolution for the natural-language parser, plus AI-written report summaries.
+## 0.4 Phase 4 completion notes
+Phase 4 (§5.1 NL improvements + §5.2 AI analyst/reporting, per the phase order in §9) is done:
+
+- **Conversation memory** (`backend/telegram/conversation.py`, new): last 2 turns per user, 10-min TTL, in-memory (same pattern as the existing wizard/confirmation state — lost on restart, fine at this scale). Rendered into the NL prompt as RECENT CONTEXT so a follow-up like "make it 10" can complete the previous command.
+- **Fuzzy entity resolution** (`backend/telegram/entity_resolver.py`, new): builds a compact ENTITY INDEX (wallet id/address/tags, project id/name, chain id/name) injected into the prompt, plus a post-parse `resolve_entities()` pass that fuzzy-matches any non-numeric id the LLM returns against real rows. Ambiguous matches downgrade to a clarify message listing the candidates rather than guessing — no silent wrong picks on a fund-adjacent bot.
+- **`prompt_telegram_cmd` rewritten** (`backend/ai/prompts.py`): action list cut from the old ~150 down to the curated ~45 from §4 — several of the old actions (discovery.*, report.roi, system.backup, claim.auto_on/off, project.farm/prioritize/cap/update/criteria/blacklist/circuit_breaker, chain.rpc/add_fallback/..., task.dry_run/deps/set_priority/trigger_all/template, nonce.check/sync/release, tx.status/failed/verify, gas.spike/optimal/cost/budget/history, alert.snooze/unsnooze/test/resolve/memory, system.test_rpc/maintenance*/log_archive) had no `dispatch_action()` handler since Phase 1's trim, so the LLM picking one silently failed. `agent.unlock` and `wallet.import` are explicitly forbidden in the prompt — both take a secret (master password / raw private key) that must never be typed into a chat routed through an AI API.
+- **AI-written report summaries** (`backend/reports/analyst.py`, new): trend/anomaly detection (failure-rate and gas-cost moves vs. a 7-day baseline) is computed in plain Python — the AI only narrates verified numbers, it never computes or invents one. Uses `ask_gemini`/`ask_groq` directly rather than `dual_ai_validate`, because agreement scoring compares structured decision fields and a prose summary has none — forcing it through that path would incorrectly land every summary in `/ai_pending`. Each summary is still logged as an `AIValidation` (`task_type="analyst_summary"`, `requires_human=False`, `resolved=True`) so it shows up in the AI Log / `ai_status` counts, matching the project's habit of logging every AI call in one place — the agreement_score there is an availability signal (100 = Gemini responded, 50 = only Groq did), not a correctness measure.
+  - New: `GET /reports/summary?hours=` endpoint, `/report_summary` Telegram command (also reachable via NL as `report.summary`), and an "AI Summary" tab on the Reports page.
+  - The 08:00 UTC daily Telegram summary now appends the narrative to the same message rather than sending a second one — one coherent report, one round trip. Falls back to a plain factual rendering (still computed, no AI) if both Gemini and Groq are down, so the daily summary never goes out empty.
+- **Fixed while in the area**: `handle_report_sybil` (Telegram) was iterating `get_sybil_report()`'s dict return value as if it were a list — now reads `high_risk_wallets` correctly. `nl_parser.py` had a possible unbound-variable reference in its error-logging path on a Gemini JSON-decode failure — fixed.
+
+**Also shipped in this phase, per your requests during planning (moved up from the planned Phase 7 stats-dashboard groundwork):**
+- **Soft-archive for projects**: `project.status` gains `"archived"` and `"stopped"` as distinct values. "Deleting" a project via the website (`DELETE /projects/{id}`) now archives it — the row, its tasks, criteria, contracts, and transaction history all stay exactly as they were, so nothing is lost for the future stats dashboard. `POST /projects/{id}/restore` undoes it. "Stopped" is a separate deliberate-halt state, distinct from `paused` (circuit-breaker/temporary) and from `archived` (hidden from the default list) — a stopped project stays visible.
+- **Eligibility declaration** (website-only, per your call): new `Project` columns `eligibility_status` (`pending`/`eligible`/`not_eligible`), `eligibility_value_usd`, `eligibility_declared_at`. `POST /projects/{id}/eligibility` declares an outcome; `POST /projects/{id}/eligibility/clear` undoes a mis-click. Declaring either outcome immediately and permanently stops the agent from scheduling new tasks for that project, enforced at the actual dispatch choke point (`queue_manager._project_is_dispatchable()`), independent of `status` — a declared project doesn't farm again even if manually resumed. Telegram's `project.status` / `/project_status` shows the declaration read-only; there is no Telegram setter, by design.
+- `Projects.jsx` gained Archive / Restore / Stop / Resume / Declare eligibility / Clear eligibility controls and a "show archived" toggle; a small modal collects the eligible/not-eligible choice and optional USD value.
+
+**Explicitly deferred, not part of this phase:** the full stats/overview dashboard tab (totals, active/inactive/eligible/not-eligible breakdowns, per-project active-days and tx rollups) — this phase only adds the data model and per-project controls it will read from. Folded into **Phase 7** (website build-out).
+
+**All new/edited files in Phase 4:**
+- `backend/telegram/conversation.py` — new
+- `backend/telegram/entity_resolver.py` — new
+- `backend/reports/analyst.py` — new
+- `backend/ai/prompts.py` — replace (`prompt_telegram_cmd` rewritten)
+- `backend/telegram/nl_parser.py` — replace
+- `backend/telegram/bot.py` — replace
+- `backend/telegram/alerts.py` — replace
+- `backend/telegram/commands/report.py` — replace (adds `handle_report_summary`, fixes sybil bug)
+- `backend/telegram/commands/project.py` — replace (`project.status` / `project.resume` read/respect eligibility)
+- `backend/models.py` — replace (`Project` gains eligibility + archived_at columns)
+- `backend/projects/manager.py` — replace (archive/restore/stop/declare_eligibility/clear_eligibility)
+- `backend/core/queue_manager.py` — replace (`_project_is_dispatchable()` choke point)
+- `backend/api/routes/projects.py` — replace (archive/restore/stop/eligibility endpoints; delete route now soft-archives)
+- `backend/api/routes/reports.py` — replace (`GET /reports/summary`)
+- `frontend/src/pages/Projects.jsx` — replace
+- `frontend/src/pages/Reports.jsx` — replace (AI Summary tab, "Gas spend" duplicate label fixed to "Gas by chain")
+
+## 0.5 Phase 5 completion notes
+Phase 5 (§5.4 AI error notification/reporting) is done:
+
+- **`task_failures` table** (`TaskFailure` in `backend/models.py`, new): one row per failed or skipped task run (wallet, chain, project, task, outcome, category, reason). Written from the single results point in `worker_pool._execute_task`. Created by `create_all()`; purged after 30 days by the weekly maintenance job. Skips are recorded at most once per wallet+chain+category per 30 min so the table doesn't fill with repeats.
+- **`backend/core/failure_analysis.py`** (new, shared with Phase 6): deterministic classifier (gas_spike, contract_paused, memory_pressure, task_timeout, low_gas, rpc_error, nonce_error, simulation_revert, onchain_revert, approval_failed, config_error, unknown), clustering, and the transient/systemic verdict. Cluster = 3+ events, same category, same chain, within 60 min. `find_clusters()` returns structured dicts Phase 6 can act on directly.
+- **Alerts**: `_run_failure_analysis` runs every 10 min. Transient clusters -> info alert with a fixed explanation. Systemic clusters -> warning (critical at 10+ events or 5+ wallets) with an AI-narrated likely cause (Gemini, Groq fallback; the AI only narrates verified facts and logs an `AIValidation` `task_type="failure_analysis"`). Same cluster alerts at most once per 2h unless its count doubles. Nothing is sent during emergency stop. Dedup state is in memory. All alerts go through `create_and_send_alert`, so Phase 8 topic routing has one place to change.
+- **Behavior fix in `worker_pool`**: `skipped` results (gas spike, low gas, paused contract) no longer increment `wallet.failure_count` or the project circuit breaker. Before, 3 low-gas skips put a wallet in cooldown and 5 tripped the breaker. Only `failed` results and real exceptions/timeouts count. `simulated` (dry-run) counts as neither.
+- **Bugs fixed in passing**: `tx_monitor.py` missing imports (pending txs never updated); `contract_watcher.check_all_contracts` did not exist (4-hourly job failed on import); `token_registry.get_token_address` / `get_wrapped_native` did not exist (swaps using token symbols always failed); `create_and_send_alert` now honors `alert_snooze` (critical alerts always sent).
+
+**Known, not fixed:** `SwapTask` uses `self.token_decimals` (18) for every input token, so token->token swaps of 6-decimal tokens (USDC/USDT) compute a wrong amount. Needs a decimals lookup before ERC20 swaps are trusted.
+
+**New/edited files in Phase 5:**
+- `backend/models.py` — append `TaskFailure`
+- `backend/core/failure_analysis.py` — new
+- `backend/core/worker_pool.py` — replace
+- `backend/core/scheduler.py` — replace
+- `backend/core/tx_monitor.py` — replace
+- `backend/chains/contract_watcher.py` — replace
+- `backend/chains/token_registry.py` — replace
+- `backend/telegram/commands/alert.py` — replace (adds `is_snoozed()`)
+- `backend/telegram/alerts.py` — 3-line edit (see chat)
+
+Next up: Phase 6 — AI-managed tasks/wallets (§5.3), built on `find_clusters()`.
 
 **Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase(with short description of each phase).
 

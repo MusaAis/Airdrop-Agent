@@ -23,3 +23,11 @@ async def check_bytecode_changes():
                     logger.warning(f"Contract upgraded: {c.label} ({c.address})")
             except Exception as e:
                 logger.error(f"Bytecode check failed: {e}")
+
+
+async def check_all_contracts(db=None):
+    """Phase 5 fix: scheduler._run_contract_check imports this name, which did
+    not exist, so the 4-hourly job failed on import every time. Thin wrapper;
+    the db argument is accepted for the scheduler's call signature only —
+    check_bytecode_changes opens its own session."""
+    await check_bytecode_changes()

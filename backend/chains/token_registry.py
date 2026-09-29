@@ -6,7 +6,7 @@ import logging
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from backend.models import ChainToken
+from backend.models import ChainToken, Chain
 
 logger = logging.getLogger("airdrop.token_registry")
 
@@ -59,6 +59,30 @@ async def get_token_contract(
 ) -> Optional[str]:
     contract, _ = await resolve_token(db, chain_db_id, symbol)
     return contract
+
+
+async def get_token_address(
+    chain_db_id: int, symbol: str, db: AsyncSession
+) -> Optional[str]:
+    """Phase 5 fix: tasks/swap.py imports this (argument order chain, symbol,
+    db) but it did not exist, so every swap using a token symbol failed."""
+    contract, _ = await resolve_token(db, chain_db_id, symbol)
+    return contract
+
+
+async def get_wrapped_native(chain_db_id: int, db: AsyncSession) -> Optional[str]:
+    """Phase 5 fix (same import gap as above). Looks for a registered token
+    named 'W' + the chain's gas symbol (WETH, WBNB, ...). Returns None if not
+    registered; swap.py then falls back to task_config.parameters
+    ['wrapped_native_address']."""
+    chain = await db.get(Chain, chain_db_id)
+    if not chain:
+        return None
+    try:
+        contract, _ = await resolve_token(db, chain_db_id, f"W{chain.gas_token_symbol}")
+        return contract
+    except ValueError:
+        return None
 
 
 async def register_token(

@@ -49,12 +49,6 @@ async def agent_kill(
     db: AsyncSession = Depends(get_db),
     _user: dict = Depends(verify_token),
 ):
-    """
-    Emergency full stop. Previously this endpoint didn't exist at all — only
-    the Telegram /agent_kill command did, so the dashboard had no way to
-    trigger an emergency stop. Also clears the in-memory queue (see the same
-    fix in telegram/commands/agent.py:handle_agent_kill for why that matters).
-    """
     from backend.core.kill_switch import activate_kill_switch
     queued_count = len(worker_pool.queue)
     async with worker_pool.lock:
@@ -202,3 +196,22 @@ async def resolve_all_alerts(_user: dict = Depends(verify_token), db: AsyncSessi
     await db.execute(update(AlertModel).where(AlertModel.resolved == False).values(resolved=True))
     await db.commit()
     return {"ok": True}
+
+@router.get("/alerts/snooze")
+async def alert_snooze_status(_user: dict = Depends(verify_token)):
+    from backend.telegram.commands.alert import snooze_until
+    until = snooze_until()
+    return {"snoozed": until is not None, "until": until.isoformat() if until else None}
+
+@router.post("/alerts/snooze")
+async def alert_snooze_set(minutes: int = 30, _user: dict = Depends(verify_token)):
+    from backend.telegram.commands.alert import set_snooze
+    minutes = max(1, min(1440, minutes))
+    until = set_snooze(minutes)
+    return {"snoozed": True, "until": until.isoformat()}
+
+@router.delete("/alerts/snooze")
+async def alert_snooze_clear(_user: dict = Depends(verify_token)):
+    from backend.telegram.commands.alert import clear_snooze
+    clear_snooze()
+    return {"snoozed": False, "until": None}

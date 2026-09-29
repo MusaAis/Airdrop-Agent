@@ -434,5 +434,15 @@ class CompetitorWallet(Base):
     transaction_patterns: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-# DiscoveryRun model removed — the discovery/scraping system it tracked was
-# removed entirely (see PLAN.md §3). Projects are now submitted manually only.
+class TaskFailure(Base):
+    __tablename__ = "task_failures"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wallet_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    chain_id: Mapped[Optional[int]] = mapped_column(Integer, index=True)
+    project_id: Mapped[Optional[int]] = mapped_column(Integer)
+    task_config_id: Mapped[Optional[int]] = mapped_column(Integer)
+    task_type: Mapped[Optional[str]] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text)   # "failed" | "skipped"
+    category: Mapped[str] = mapped_column(Text, index=True)
+    reason: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)

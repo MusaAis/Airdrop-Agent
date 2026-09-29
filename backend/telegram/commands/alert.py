@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime, timezone, timedelta
 from backend.telegram.whitelist import is_whitelisted
 
 logger = logging.getLogger("airdrop.tg.alert")
@@ -8,21 +9,47 @@ _snoozed = False
 _snooze_until = None
 
 
+def is_snoozed() -> bool:
+    """Live getter used by create_and_send_alert (Phase 5). Expires on its own."""
+    global _snoozed, _snooze_until
+    if not _snoozed:
+        return False
+    if _snooze_until and datetime.now(timezone.utc) >= _snooze_until:
+        _snoozed = False
+        _snooze_until = None
+        return False
+    return True
+
+
+def set_snooze(minutes: int) -> datetime:
+    """Shared by the Telegram handler and the website API (Phase 5 follow-up)."""
+    global _snoozed, _snooze_until
+    _snoozed = True
+    _snooze_until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+    return _snooze_until
+
+
+def clear_snooze() -> None:
+    global _snoozed, _snooze_until
+    _snoozed = False
+    _snooze_until = None
+
+
+def snooze_until():
+    """Returns the expiry datetime if snoozed, else None."""
+    return _snooze_until if is_snoozed() else None
+
+
 async def handle_alert_snooze(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    global _snoozed, _snooze_until
-    from datetime import datetime, timezone, timedelta
     mins = int(args[0]) if args else 30
-    _snoozed = True
-    _snooze_until = datetime.now(timezone.utc) + timedelta(minutes=mins)
-    return f"🔕 Non-critical alerts snoozed for {mins} minutes (until {_snooze_until.strftime('%H:%M')} UTC)."
+    until = set_snooze(mins)
+    return f"🔕 Non-critical alerts snoozed for {mins} minutes (until {until.strftime('%H:%M')} UTC)."
 
 
 async def handle_alert_unsnooze(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    global _snoozed, _snooze_until
-    _snoozed = False
-    _snooze_until = None
+    clear_snooze()
     return "🔔 All alerts re-enabled."
 
 

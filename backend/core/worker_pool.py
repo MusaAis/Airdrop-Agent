@@ -21,6 +21,7 @@ from backend.core.nonce_manager import lock_nonce, release_nonce
 from backend.wallet.balance import get_gas_token_balance
 from backend.core.gas_spike_guard import check_gas_spike
 from backend.core.memory_guard import is_memory_critical
+from backend.core.failure_analysis import classify_result, classify_error_text, record_failure
 
 from backend.tasks.swap import SwapTask
 from backend.tasks.generic import InteractContractTask
@@ -93,6 +94,15 @@ class WorkerPool:
         chain = item["chain"]
         key = (wallet.id, chain.id)
 
+        # Phase 5: every failure/skip is written to task_failures with a
+        # deterministic category (see core/failure_analysis.py).
+        async def _record(outcome: str, category: str, reason: str):
+            await record_failure(
+                wallet_id=wallet.id, chain_id=chain.id, project_id=project.id,
+                task_config_id=task_config.id, task_type=task_config.task_type,
+                outcome=outcome, category=category, reason=reason,
+            )
+
         async with async_session() as db:
             # Check if wallet+chain already has a DB active task row
             stmt = select(ActiveTask).where(
@@ -126,6 +136,7 @@ class WorkerPool:
                 await db.commit()
                 async with self.lock:
                     self.active_task_ids.discard(key)
+                await _record("skipped", "memory_pressure", "memory critical, dispatch paused")
                 return
 
             # Gas spike guard — same cleanup before early return (fix 3.2)
@@ -135,6 +146,7 @@ class WorkerPool:
                 await db.commit()
                 async with self.lock:
                     self.active_task_ids.discard(key)
+                await _record("skipped", "gas_spike", "gas price above spike threshold, task deferred")
                 return
 
             # Build the correct task class
@@ -145,13 +157,15 @@ class WorkerPool:
                 await db.commit()
                 async with self.lock:
                     self.active_task_ids.discard(key)
+                await _record("failed", "config_error", f"No handler for task type {task_config.task_type}")
                 return
 
             task_instance = task_cls(task_config, wallet, chain, project, db)
 
             try:
                 result = await asyncio.wait_for(task_instance.execute(), timeout=480)
-                if result.get("status") == "success":
+                status = result.get("status")
+                if status == "success":
                     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     progress = await get_or_create_daily_target(db, wallet.id, wallet.address, project.id, task_config, today_str)
                     progress.completed += 1
@@ -160,13 +174,23 @@ class WorkerPool:
                     if project.consecutive_failures > 0:
                         from backend.projects.circuit_breaker import reset_circuit
                         await reset_circuit(db, project)
-                else:
+                elif status == "failed":
                     wallet.failure_count += 1
                     if wallet.failure_count >= 3:
                         wallet.status = "cooldown"
                     # Increment project-level circuit breaker on failure (fix 3.4)
                     from backend.projects.circuit_breaker import increment_failure
                     await increment_failure(db, project)
+                    category, reason = classify_result(result)
+                    await _record("failed", category, reason)
+                elif status == "skipped":
+                    # Phase 5: a skip (gas spike, low gas, paused contract) is
+                    # NOT a failure. Previously it incremented failure_count
+                    # (3 low-gas skips => cooldown) and the project circuit
+                    # breaker (5 => auto-pause), punishing transient causes.
+                    category, reason = classify_result(result)
+                    await _record("skipped", category, reason)
+                # any other status (e.g. "simulated" in dry-run): no counters
                 await db.commit()
             except asyncio.TimeoutError:
                 logger.error(f"Task timed out after 8 min: wallet={wallet.id} chain={chain.id}")
@@ -174,11 +198,13 @@ class WorkerPool:
                 wallet.failure_count += 1
                 from backend.projects.circuit_breaker import increment_failure
                 await increment_failure(db, project)
+                await _record("failed", "task_timeout", "task exceeded the 8 minute limit")
             except Exception as e:
                 logger.error(f"Task execution error: {e}")
                 wallet.failure_count += 1
                 from backend.projects.circuit_breaker import increment_failure
                 await increment_failure(db, project)
+                await _record("failed", classify_error_text(str(e)), str(e))
             finally:
                 # Always remove active task row and in-memory key (fixes 3.1 and 3.2)
                 try:

@@ -2,10 +2,11 @@
 APScheduler setup for all periodic background jobs:
 - Faucet auto-trigger (every 30 minutes)
 - Sybil re-scoring (randomized 6-18h interval, re-rolled each cycle)
-- Log archival (weekly)
+- Log archival + task_failures purge (weekly)
 - Daily summary Telegram report (every day at 08:00 UTC)
 - Gas history sampling (every 10 minutes)
 - Contract upgrade check (every 4 hours)
+- Failure cluster analysis + alerts (every 10 minutes, Phase 5)
 
 Discovery scanning and encrypted DB backups were removed (see PLAN.md).
 """
@@ -122,6 +123,24 @@ async def _run_log_archival():
         logger.info(f"Log archival: {result}")
     except Exception as e:
         logger.error(f"Log archival error: {e}")
+    try:
+        from backend.core.failure_analysis import purge_old_failures
+        purged = await purge_old_failures()
+        if purged:
+            logger.info(f"Purged {purged} task_failures rows older than retention")
+    except Exception as e:
+        logger.error(f"task_failures purge error: {e}")
+
+
+async def _run_failure_analysis():
+    """Phase 5 (§5.4): cluster recent failures and alert once per cluster."""
+    try:
+        from backend.core.failure_analysis import analyze_and_alert
+        sent = await analyze_and_alert()
+        if sent:
+            logger.info(f"Failure analysis: {len(sent)} cluster alert(s) sent")
+    except Exception as e:
+        logger.error(f"Failure analysis error: {e}")
 
 
 async def _run_daily_summary():
@@ -169,6 +188,7 @@ def start_scheduler():
     sched.add_job(_run_daily_summary,  CronTrigger(hour=8, minute=0), id="daily_summary",   replace_existing=True)
     sched.add_job(_run_gas_sample,     IntervalTrigger(minutes=10),  id="gas_sample",       replace_existing=True)
     sched.add_job(_run_contract_check, IntervalTrigger(hours=4),     id="contract_check",   replace_existing=True)
+    sched.add_job(_run_failure_analysis, IntervalTrigger(minutes=10), id="failure_analysis", replace_existing=True)
 
     if not sched.running:
         sched.start()
@@ -186,4 +206,3 @@ def stop_scheduler():
     if sched.running:
         sched.shutdown(wait=False)
         logger.info("APScheduler stopped")
-
