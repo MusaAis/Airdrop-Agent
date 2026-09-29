@@ -11,7 +11,8 @@ from backend.database import get_db
 from backend.models import Project, TaskConfig
 from backend.projects.manager import (
     create_project, get_project, list_projects, update_project, delete_project,
-    create_task_config, list_task_configs, get_task_config, update_task_config, delete_task_config
+    create_task_config, list_task_configs, get_task_config, update_task_config, delete_task_config,
+    archive_project, restore_project, stop_project, declare_eligibility, clear_eligibility,
 )
 from backend.projects.eligibility import compute_eligibility
 from backend.projects.criteria import list_criteria, upsert_criteria_from_ai
@@ -90,9 +91,23 @@ class CriteriaDraftRequest(BaseModel):
 class CriteriaAcceptRequest(BaseModel):
     criteria: List[Dict[str, Any]]  # the (possibly user-edited) draft items to save
 
+class EligibilityDeclareRequest(BaseModel):
+    eligible: bool
+    value_usd: Optional[float] = None  # only meaningful when eligible=True
+
 @router.get("/")
-async def list_projects_route(_user: dict = Depends(verify_token), status: Optional[str] = None, db: AsyncSession = Depends(get_db)):
-    return await list_projects(db, status)
+async def list_projects_route(
+    _user: dict = Depends(verify_token),
+    status: Optional[str] = None,
+    include_archived: bool = False,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Phase 4: archived projects are hidden by default (soft-delete). Pass
+    ?include_archived=true or ?status=archived to see them — used by the
+    future Phase 7 stats dashboard, not needed for the normal Projects tab.
+    """
+    return await list_projects(db, status, include_archived=include_archived)
 
 @router.post("/")
 async def create_project_route(data: ProjectCreate, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
@@ -115,10 +130,65 @@ async def update_project_route(project_id: int, data: ProjectUpdate, _user: dict
 
 @router.delete("/{project_id}")
 async def delete_project_route(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
-    success = await delete_project(db, project_id)
-    if not success:
+    """
+    Phase 4: this now soft-archives instead of hard-deleting. Musa's
+    requirement is that a "deleted" project stays in the historical record
+    (for the Phase 7 stats dashboard) rather than disappearing from the DB.
+    Use POST /{project_id}/restore to undo, or see backend/projects/manager.py
+    for the (unwired) hard-delete helper if a true delete is ever needed.
+    """
+    project = await archive_project(db, project_id)
+    if not project:
         raise HTTPException(404, "Project not found")
-    return {"message": "Deleted"}
+    return {"message": f"Project '{project.name}' archived (soft-deleted) — still visible with ?include_archived=true"}
+
+@router.post("/{project_id}/restore")
+async def restore_project_route(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    project = await restore_project(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return {"message": f"Project '{project.name}' restored to active"}
+
+@router.post("/{project_id}/stop")
+async def stop_project_route(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """
+    Deliberate manual halt — distinct from archive (stays visible in the
+    default project list) and distinct from a circuit-breaker auto-pause
+    (this is intentional, not failure-triggered). Farming stops immediately
+    since queue_manager.py only dispatches status == 'active' projects.
+    """
+    project = await stop_project(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return {"message": f"Project '{project.name}' stopped"}
+
+@router.post("/{project_id}/eligibility")
+async def declare_eligibility_route(
+    project_id: int, data: EligibilityDeclareRequest,
+    _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db),
+):
+    """
+    Website-only control (per Phase 4 scope — Telegram has no setter for
+    this, only project.status reads it). Declaring eligible or not_eligible
+    either way immediately stops the agent from scheduling any further tasks
+    for this project, regardless of its `status` field — see
+    queue_manager._project_is_dispatchable().
+    """
+    project = await declare_eligibility(db, project_id, data.eligible, data.value_usd)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    verdict = "eligible" if data.eligible else "not eligible"
+    value_note = f" (est. ${data.value_usd:.2f})" if data.eligible and data.value_usd else ""
+    return {"message": f"Project '{project.name}' declared {verdict}{value_note}. Farming stopped for this project."}
+
+@router.post("/{project_id}/eligibility/clear")
+async def clear_eligibility_route(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """Undo an eligibility declaration (e.g. mis-click). Farming resumes on
+    the next queue cycle if the project's status is otherwise active."""
+    project = await clear_eligibility(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    return {"message": f"Eligibility cleared for '{project.name}' — back to pending."}
 
 # Task config endpoints
 @router.get("/{project_id}/tasks")
@@ -156,6 +226,14 @@ async def delete_task_config_route(task_id: int, _user: dict = Depends(verify_to
 
 @router.get("/{project_id}/eligibility/{wallet_id}")
 async def wallet_eligibility(project_id: int, wallet_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """
+    NOTE: this is the existing per-wallet CRITERIA-PROGRESS check (how close
+    is this wallet to meeting the project's eligibility criteria) — unrelated
+    to the new Phase 4 declare_eligibility() outcome flag above, which is a
+    single per-project yes/no/pending declared by Musa. Both live under
+    "/eligibility" but at different path shapes; kept as-is to avoid breaking
+    the existing dashboard call in AddProject.jsx / Projects.jsx.
+    """
     wallet = await get_wallet(db, wallet_id)
     if not wallet:
         raise HTTPException(404, "Wallet not found")

@@ -31,7 +31,29 @@ async def handle_project_status(user_id, args, db, confirmation=None):
     if not args: return "Usage: project.status <id>"
     project = await get_project(db, int(args[0]))
     if not project: return "Project not found."
-    return f"{project.name}: status={project.status} priority={project.priority}"
+
+    lines = [f"{project.name}: status={project.status} priority={project.priority}"]
+
+    # Phase 4: eligibility declaration is website-only to SET, but Telegram
+    # should always be able to READ it — otherwise there's no quick-remote
+    # way to check "did I already declare this one?" without opening the
+    # dashboard. See backend/projects/manager.py declare_eligibility().
+    elig = getattr(project, "eligibility_status", "pending")
+    if elig == "eligible":
+        value_note = f" (~${project.eligibility_value_usd:.2f})" if project.eligibility_value_usd else ""
+        lines.append(f"✅ Declared ELIGIBLE{value_note} — farming stopped for this project.")
+    elif elig == "not_eligible":
+        lines.append("❌ Declared NOT ELIGIBLE — farming stopped for this project.")
+    else:
+        if project.status == "archived":
+            lines.append("📦 Archived (soft-deleted) — hidden from the default list, still in history.")
+        elif project.status == "stopped":
+            lines.append("🛑 Stopped manually — not farming, not archived.")
+        else:
+            lines.append("⏳ Eligibility not yet declared.")
+
+    lines.append("(Eligibility and archive/stop are set from the website dashboard, not Telegram.)")
+    return "\n".join(lines)
 
 async def handle_project_disable(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
@@ -56,6 +78,14 @@ async def handle_project_pause(user_id, args, db, confirmation=None):
 async def handle_project_resume(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     if not args: return "Usage: project.resume <id>"
+    project = await get_project(db, int(args[0]))
+    if project and getattr(project, "eligibility_status", "pending") in ("eligible", "not_eligible"):
+        return (
+            "⚠️ This project was declared "
+            f"{'eligible' if project.eligibility_status == 'eligible' else 'not eligible'} "
+            "and won't farm again even if resumed. Clear the eligibility declaration "
+            "on the website dashboard first if that was a mistake."
+        )
     await update_project(db, int(args[0]), status="active")
     return "▶ Project resumed."
 

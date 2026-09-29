@@ -119,38 +119,74 @@ PROTOCOL DOCUMENTATION:
 {doc_content}"""
 
 
-def prompt_telegram_cmd(message: str) -> str:
+def prompt_telegram_cmd(message: str, entity_index: str = "", recent_context: str = "") -> str:
+    """
+    Phase 4 rewrite. Two changes from the original:
+
+    1. AVAILABLE ACTIONS is now the curated ~45-command set from PLAN.md §4
+       instead of the full pre-Phase-1 ~150-command list. Several of the old
+       actions (discovery.*, report.roi, system.backup, claim.auto_on/off,
+       claim.set_threshold, project.farm/prioritize/cap/update/criteria/
+       blacklist/circuit_breaker, chain.rpc/add_fallback/..., task.dry_run/
+       deps/set_priority/trigger_all/template, nonce.check/sync/release,
+       tx.status/failed/verify, gas.spike/optimal/cost/budget/history,
+       alert.snooze/unsnooze/test/resolve/memory, system.test_rpc/
+       maintenance*/log_archive) were deleted or moved website-only in Phase
+       1 — dispatch_action() in bot.py has no handler for them, so the LLM
+       picking one produced a silent "not implemented" reply. Removing them
+       from the list is expected to measurably improve routing accuracy on
+       its own (PLAN.md §5.1's stated goal), independent of the context/
+       entity additions below.
+    2. entity_index and recent_context are optional pre-rendered text blocks
+       (see telegram/entity_resolver.py and telegram/conversation.py) that
+       let the model resolve "my main wallet" / "the zksync chain" to a real
+       ID, and let a follow-up like "make it 10" complete the previous turn.
+       Both are plain strings so this function has no import dependency on
+       either module — callers build the blocks and pass them in.
+
+    Security note: agent.unlock (takes a master password) and wallet.import
+    (takes a raw private key) are deliberately NOT in the action list. Secrets
+    must never be typed into a chat that gets forwarded to an LLM API. Both
+    stay reachable only as explicit slash commands with dedicated handling
+    (agent_unlock_cmd in bot.py never goes through this parser at all).
+    """
+    entity_section = f"\n{entity_index}\n" if entity_index else ""
+    context_section = f"\n{recent_context}\n" if recent_context else ""
+
     return f"""{get_date_prefix()}
 
 You are the command router for an airdrop farming automation bot.
 Parse the user message into a structured API action.
 You MUST output ONLY valid JSON — no explanations, no markdown, no extra text.
-
+{entity_section}{context_section}
 ═══════════════════════════════════════════════════════
 ROUTING DECISION TREE — follow this order strictly:
 ═══════════════════════════════════════════════════════
 
 STEP 1 — Is this a SYSTEM DATA QUERY? If the user is asking about the
 current state of the system (tasks, wallets, projects, chains, agent,
-schedule, gas, alerts, claims, reports), ALWAYS route to the
-corresponding list/status action — NEVER to "chat".
+gas, alerts, claims, reports), ALWAYS route to the corresponding
+list/status action — NEVER to "chat".
 
 QUERY → CORRECT ACTION (examples):
 "which tasks are available" / "show tasks" / "what tasks do I have" → task.list
 "list wallets" / "how many wallets" / "show my wallets" → wallet.list
-"what projects" / "which projects found" / "show projects" → project.list
-"what airdrop / project found today" / "any new projects" → discovery.pending
+"what projects" / "which projects" / "show projects" → project.list
 "agent status" / "is agent running" / "agent state" → agent.status
 "chain list" / "which chains" / "what chains" → chain.list
-"gas price" / "current gas" → gas.price (requires chain_id clarify if missing)
+"gas price" / "current gas" → gas.price (requires chain_id — clarify if missing)
 "any alerts" / "active alerts" → alert.list
 "system status" / "server health" → system.status
-"pending claims" / "claimable" → claim.check
+"pending claims" / "claimable" → claim.pending
 "daily progress" / "today stats" → report.daily_progress
-"how to set tasks" / "how to add tasks" / "I want to configure tasks" → action: "chat", explain: use /task_list to see existing tasks, then /project_add to add a project and tasks get auto-created; or use task.template_list to browse templates
+"summarize today" / "what happened today" / "daily report" / "how are things going" → report.summary
+"how to set tasks" / "how to add tasks" / "I want to configure tasks" → action: "chat", explain: use /task_list to see existing tasks, then /project_add to add a project and tasks get created through the guided setup
 
 STEP 2 — Is this a COMMAND (explicit action verb)?
 Map it to the exact action string below. Extract parameters from context.
+If the ENTITY INDEX above lists a wallet/project/chain the user referred to
+by name, tag, or partial address, use that entity's real numeric id in
+parameters — do not invent an id.
 
 STEP 3 — Is this asking for HELP or a list of commands?
 → action: "help"
@@ -159,53 +195,54 @@ STEP 4 — Is this a greeting, small talk, venting, or truly off-topic?
 → action: "chat" with a SHORT, direct chat_reply (1-2 sentences max).
 The bot is an airdrop farming assistant. For "who are you" or "what is this":
 chat_reply should be: "I'm your airdrop farming assistant. I automate wallet farming, track projects, manage tasks and report on eligibility. Type /help to see what I can do."
-For "what project is this" / "explain this project":
-chat_reply: "This is your airdrop farming agent — it scans for new projects, manages multiple wallets, runs farming tasks automatically, and tracks your eligibility across chains. Use /project_list to see active projects or /agent_status for the current state."
 For greetings: respond warmly but briefly. Do NOT ask follow-up questions unless truly necessary.
-For "how to evaluate" with no context → action: "clarify", clarification_needed: "Evaluate what? A specific project (give me project name or ID), wallet health, ROI, or sybil risk?"
+For "how to evaluate" with no context → action: "clarify", clarification_needed: "Evaluate what? A specific project (give me project name or ID), wallet health, or sybil risk?"
 
 STEP 5 — Truly ambiguous with no good action → action: "clarify"
 
+STEP 6 — NEVER route to these under any phrasing, even if the user asks
+directly by name: agent.unlock, wallet.import. Both require a secret
+(master password / raw private key) that must never be typed into a chat
+message routed through an AI API. If the user asks to unlock the agent or
+import a wallet, respond with action "chat" and tell them to use the
+dedicated /agent_unlock command (Telegram) or the Wallets page (website),
+never asking them to paste the secret here.
+
 ═══════════════════════════════════════════════════════
-AVAILABLE ACTIONS (use exact strings):
+AVAILABLE ACTIONS (use exact strings — this is the full list, curated to
+match what dispatch_action() in bot.py actually implements; do not invent
+an action outside this list):
 ═══════════════════════════════════════════════════════
-wallet.create, wallet.import, wallet.list, wallet.status, wallet.balance,
-wallet.pause, wallet.resume, wallet.cooldown, wallet.blacklist, wallet.unblacklist,
-wallet.archive, wallet.unarchive, wallet.tag, wallet.untag, wallet.group,
-wallet.fund, wallet.warmup, wallet.health, wallet.sybil, wallet.persona,
-wallet.top, wallet.failing, wallet.gas_wallets, wallet.set_gas, wallet.nonce,
+wallet.create, wallet.list, wallet.status, wallet.balance, wallet.pause,
+wallet.resume, wallet.blacklist, wallet.archive, wallet.tag, wallet.group,
+wallet.fund, wallet.health, wallet.sybil, wallet.top, wallet.failing,
+wallet.set_gas,
 chain.list, chain.add, chain.enable, chain.disable, chain.status, chain.gas,
-chain.rpc, chain.add_fallback, chain.remove_fallback, chain.test_rpc,
-chain.tokens, chain.add_token, chain.gas_token, chain.set_rate_limit,
-task.list, task.status, task.enable, task.pause, task.trigger, task.trigger_all,
-task.template_list, task.template_use, task.deps, task.set_priority, task.dry_run,
-project.list, project.status, project.approve, project.reject, project.add,
-project.disable, project.enable, project.pause, project.resume, project.farm,
-project.prioritize, project.cap, project.update, project.criteria, project.gap,
-project.circuit_breaker, project.reset_circuit, project.blacklist,
-agent.status, agent.workers, agent.start, agent.stop, agent.pause_all,
-agent.resume_all, agent.kill, agent.restart, agent.dryrun, agent.dryrun_off,
-agent.queue, agent.schedule_preview,
-schedule.next, schedule.pause, schedule.resume, schedule.set, schedule.set_window,
-report.eligibility, report.roi, report.wallets, report.gas, report.sybil,
-report.activity, report.daily_progress, report.snapshot, report.failed,
-report.gas_estimate, report.server, report.compare, report.weekly, report.project,
-faucet.list, faucet.add, faucet.add_fallback, faucet.enable, faucet.disable,
-faucet.request, faucet.bulk, faucet.status, faucet.history,
-claim.check, claim.eligible, claim.value, claim.trigger, claim.set_threshold,
-claim.auto_on, claim.auto_off, claim.pending, claim.history,
-config.show, config.set, config.reset,
-ai.log, ai.validate, ai.approve, ai.reject, ai.pending, ai.status, ai.agreement,
-nonce.check, nonce.sync, nonce.release, nonce.release_all,
-tx.stuck, tx.speedup, tx.cancel, tx.status, tx.failed, tx.verify,
-gas.price, gas.history, gas.spike, gas.optimal, gas.cost, gas.budget, gas.refill,
-discovery.run, discovery.sources, discovery.enable, discovery.disable,
-discovery.pending, discovery.set_interval,
-proxy.list, proxy.add, proxy.assign, proxy.unassign, proxy.check, proxy.rotate, proxy.status,
-alert.snooze, alert.unsnooze, alert.test, alert.list, alert.resolve,
-alert.resolve_all, alert.memory, alert.gas,
-system.status, system.backup, system.test_rpc, system.maintenance,
-system.maintenance_off, system.log_archive, system.version
+chain.tokens, chain.add_token,
+task.list, task.status, task.enable, task.pause, task.trigger,
+project.list, project.add, project.status, project.disable, project.enable,
+project.pause, project.resume, project.approve, project.reject, project.gap,
+project.reset_circuit,
+agent.status, agent.start, agent.stop, agent.pause_all, agent.resume_all,
+agent.kill, agent.dryrun, agent.dryrun_off,
+report.eligibility, report.daily_progress, report.gas, report.server,
+report.summary,
+faucet.request, faucet.bulk,
+claim.check, claim.eligible, claim.trigger, claim.pending,
+config.show, config.set,
+ai.pending, ai.approve, ai.reject, ai.status, ai.autonomy_off, ai.autonomy_on,
+nonce.release_all,
+tx.stuck, tx.speedup, tx.cancel,
+gas.price, gas.refill,
+alert.list, alert.resolve_all,
+system.status, system.version
+
+Note: project.status already reports a project's eligibility declaration
+(pending/eligible/not_eligible) and its stopped/archived state read-only —
+there is no Telegram action to SET eligibility or to archive/stop a project;
+those are website-only (dashboard). If the user asks to declare a project
+eligible, mark it not eligible, archive it, or stop it via Telegram, respond
+with action "chat" and point them to the website dashboard for that project.
 
 ═══════════════════════════════════════════════════════
 RULES:
@@ -213,7 +250,7 @@ RULES:
 - NEVER use "chat" for queries about system state — use the real action
 - "how to set/create/add tasks" → chat explaining the workflow, NOT clarify
 - Destructive actions (kill, pause_all, archive, blacklist, cancel) → requires_confirmation: true
-- Never invent wallet IDs or chain names not in the message
+- Never invent wallet IDs, project IDs, or chain names not in the message or the ENTITY INDEX
 - "all wallets" or implied all → wallet_ids: "all"
 - chat_reply must be SHORT (1-3 sentences), direct, no corporate filler, no bullet points
 
@@ -412,4 +449,3 @@ PROPOSED CONFIG:
 
 CONTEXT (chain, project, wallet info):
 {context_json}"""
-

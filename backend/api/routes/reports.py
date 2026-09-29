@@ -11,6 +11,7 @@ from backend.reports.activity import get_activity_log
 from backend.reports.performance import get_avg_confirmation_time, get_worker_utilization, get_rpc_latency_percentiles
 from backend.reports.server import get_server_status
 from backend.reports.export import export_csv
+from backend.reports.analyst import generate_daily_summary_narrative, format_plain_fallback
 from fastapi.responses import PlainTextResponse
 from backend.reports.performance import get_avg_confirmation_time, get_worker_utilization, get_rpc_latency_percentiles
 
@@ -56,6 +57,31 @@ async def activity_log(_user: dict = Depends(verify_token), hours: int = 24, wal
 async def server_status(_user: dict = Depends(verify_token)):
     return get_server_status()
 
+@router.get("/summary")
+async def summary_report(
+    _user: dict = Depends(verify_token),
+    hours: int = Query(24, ge=1, le=168),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Phase 4 (§5.2): AI-narrated operational summary. Trend detection (failure
+    rate / gas cost vs 7-day baseline) is computed in plain Python in
+    reports/analyst.py — the AI only narrates already-verified numbers, never
+    invents them. Falls back to a plain factual rendering if both Gemini and
+    Groq are unavailable, so this endpoint never returns nothing useful.
+    """
+    result = await generate_daily_summary_narrative(db, hours=hours)
+    narrative = result["narrative"]
+    if narrative is None:
+        narrative = format_plain_fallback(result["facts"])
+    return {
+        "narrative": narrative,
+        "ai_generated": result["narrative"] is not None,
+        "facts": result["facts"],
+        "validation_id": result["validation_id"],
+        "error": result["error"],
+    }
+
 @router.get("/export/{table}")
 async def export_table(table: str, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
     if table not in ("transactions", "wallets"):
@@ -73,5 +99,3 @@ async def worker_utilization(_user: dict = Depends(verify_token)):
 @router.get("/performance/rpc-latency/{chain_id}")
 async def rpc_latency(chain_id: int, _user: dict = Depends(verify_token)):
     return await get_rpc_latency_percentiles(chain_id)
-
-

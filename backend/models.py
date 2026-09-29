@@ -177,6 +177,14 @@ class Project(Base):
     website: Mapped[Optional[str]] = mapped_column(Text)
     twitter: Mapped[Optional[str]] = mapped_column(Text)
     discord: Mapped[Optional[str]] = mapped_column(Text)
+    # status values: active / paused / stopped / archived / monitor / dead
+    #   - paused: temporary (project.pause) — circuit breaker also uses this
+    #   - stopped: deliberate manual halt (Phase 4) — same lifecycle slot as
+    #     paused/resume, just a distinct value so "I stopped this on purpose"
+    #     is distinguishable from a circuit-breaker auto-pause in reports
+    #   - archived: soft-delete (Phase 4) — hidden from the default project
+    #     list but the row is never removed, so historical stats (Phase 7
+    #     dashboard) can still count it
     status: Mapped[str] = mapped_column(Text, default="active")
     priority: Mapped[int] = mapped_column(Integer, default=5)
     max_concurrent_wallets: Mapped[int] = mapped_column(Integer, default=2)
@@ -189,6 +197,16 @@ class Project(Base):
     auto_claim_threshold_usd: Mapped[float] = mapped_column(Float, default=50.0)
     notes: Mapped[Optional[str]] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    # --- Phase 4: eligibility declaration (manual, website-only) ---
+    # "pending" until declared eligible/not_eligible on the dashboard. Once
+    # declared either way, queue_manager.py refuses to schedule any new task
+    # for this project regardless of `status` — a declared project is done
+    # farming, independent of whether status is still "active".
+    eligibility_status: Mapped[str] = mapped_column(Text, default="pending")
+    eligibility_value_usd: Mapped[Optional[float]] = mapped_column(Float)
+    eligibility_declared_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
 
 class ProjectContract(Base):
     __tablename__ = "project_contracts"

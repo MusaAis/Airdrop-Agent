@@ -32,7 +32,13 @@ async def handle_report_gas(user_id, args, db, confirmation=None):
 async def handle_report_sybil(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     data = await get_sybil_report(db)
-    return "\n".join(f"{r['wallet'][:10]}... risk:{r['risk_score']}" for r in data)
+    wallets = data.get("high_risk_wallets", [])
+    if not wallets:
+        return "✅ No wallets currently flagged for Sybil risk."
+    lines = [f"⚠️ {data.get('total_wallets_flagged', len(wallets))} wallet(s) flagged:"]
+    for w in wallets[:15]:
+        lines.append(f"  {w['address'][:10]}... risk:{w['risk_score']} status:{w['status']}")
+    return "\n".join(lines)
 
 async def handle_report_activity(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
@@ -45,6 +51,27 @@ async def handle_report_server(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     s = get_server_status()
     return f"RAM: {s['ram_percent']}% ({s['ram_used_gb']}/{s['ram_total_gb']} GB)\nCPU: {s['cpu_percent']}%\nDisk: {s['disk_percent']}% ({s['disk_free_gb']} GB free)\nWorkers: {s['worker_slots_active']}/{s['worker_slots_max']}"
+
+async def handle_report_summary(user_id, args, db, confirmation=None):
+    """
+    Phase 4 (§5.2). On-demand AI-narrated summary — same generator used by
+    the 08:00 UTC daily summary and GET /reports/summary. Accepts an optional
+    hours arg (default 24) so it can also answer "summarize the last week"
+    style requests via the NL parser's report.summary action.
+    """
+    if not is_whitelisted(user_id): return "⛔ Unauthorized"
+    hours = 24
+    if args:
+        try:
+            hours = max(1, min(168, int(args[0])))
+        except ValueError:
+            pass
+    from backend.reports.analyst import generate_daily_summary_narrative, format_plain_fallback
+    result = await generate_daily_summary_narrative(db, hours=hours)
+    narrative = result["narrative"] or format_plain_fallback(result["facts"])
+    prefix = "🧠 AI Summary" if result["narrative"] else "📊 Summary (AI narration unavailable)"
+    window_note = f"last {hours}h" if hours != 24 else "last 24h"
+    return f"{prefix} — {window_note}\n\n{narrative}"
 
 async def handle_report_wallets(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"

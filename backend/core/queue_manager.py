@@ -17,6 +17,34 @@ from backend.wallet.behavior_randomizer import is_in_active_hours, get_start_off
 
 logger = logging.getLogger("airdrop.queue_manager")
 
+# Phase 4: a project in any of these statuses never gets new tasks dispatched,
+# regardless of individual task_config.enabled flags. "archived" and "stopped"
+# both mean "don't touch this project anymore" — the fill_queue project query
+# below already excludes non-"active" status, so this set matters mainly for
+# defense-in-depth and for _get_project_candidates() being called directly
+# elsewhere in the future.
+_NO_DISPATCH_STATUSES = {"archived", "stopped", "paused", "monitor", "dead"}
+
+
+def _project_is_dispatchable(project: Project) -> bool:
+    """
+    Single choke point for "should this project ever get a new task queued".
+    A project is dispatchable only if:
+      - status == "active" (not paused/stopped/archived/monitor/dead), AND
+      - circuit breaker is not tripped, AND
+      - eligibility has not been declared either way (Phase 4) — once Musa
+        marks a project eligible or not_eligible on the dashboard, farming
+        stops immediately even if status is still "active", since there is
+        nothing left to farm for.
+    """
+    if project.status != "active":
+        return False
+    if project.circuit_breaker_active:
+        return False
+    if getattr(project, "eligibility_status", "pending") in ("eligible", "not_eligible"):
+        return False
+    return True
+
 
 async def fill_queue(worker_pool) -> None:
     """
@@ -32,6 +60,12 @@ async def fill_queue(worker_pool) -> None:
             .order_by(Project.priority.desc())
         )
         projects = projects_result.scalars().all()
+        if not projects:
+            return
+
+        # Phase 4: filter out anything declared eligible/not_eligible even
+        # though status is still "active" — see _project_is_dispatchable.
+        projects = [p for p in projects if _project_is_dispatchable(p)]
         if not projects:
             return
 
@@ -88,6 +122,12 @@ async def fill_queue(worker_pool) -> None:
 
 async def _get_project_candidates(db: AsyncSession, project: Project, worker_pool) -> list:
     """Get eligible wallet+task combinations for a project."""
+    # Phase 4: belt-and-suspenders check even though fill_queue already
+    # filtered the project list — protects any future caller of this
+    # function that doesn't go through fill_queue's filtering.
+    if not _project_is_dispatchable(project):
+        return []
+
     wallets_result = await db.execute(
         select(Wallet).where(Wallet.status == "active", Wallet.is_gas_wallet == False)
     )

@@ -6,6 +6,8 @@ from backend.config import TELEGRAM_BOT_TOKEN
 from backend.telegram.whitelist import is_whitelisted
 from backend.telegram.nl_parser import parse_natural_language
 from backend.telegram.project_wizard import has_active_wizard, handle_wizard_reply
+from backend.telegram.entity_resolver import resolve_entities
+from backend.telegram.conversation import record_turn
 from backend.telegram.commands.wallet import (
     handle_wallet_create, handle_wallet_list, handle_wallet_status,
     handle_wallet_balance, handle_wallet_pause, handle_wallet_resume,
@@ -35,7 +37,7 @@ from backend.telegram.commands.faucet import (
 )
 from backend.telegram.commands.report import (
     handle_report_eligibility, handle_report_daily_progress,
-    handle_report_gas, handle_report_server,
+    handle_report_gas, handle_report_server, handle_report_summary,
 )
 from backend.telegram.commands.config import (
     handle_config_set, handle_config_show,
@@ -300,6 +302,9 @@ async def dispatch_action(user_id: int, action: str, params: dict, db) -> str:
             resp = await handle_report_gas(user_id, [str(cid)] if cid else [], db)
         elif action == "report.server":
             resp = await handle_report_server(user_id, [], db)
+        elif action == "report.summary":
+            hours = params.get("hours")
+            resp = await handle_report_summary(user_id, [str(hours)] if hours else [], db)
 
         # CONFIG
         elif action == "config.show":
@@ -376,8 +381,10 @@ async def dispatch_action(user_id: int, action: str, params: dict, db) -> str:
         elif action == "agent.dryrun_off":
             resp = await handle_agent_dryrun_off(user_id, db)
         elif action == "agent.unlock":
-            pw = params.get("password")
-            resp = await handle_agent_unlock(user_id, pw, db) if pw else "Missing password — use /agent_unlock <password>"
+            # Never reachable via NL parsing — prompt_telegram_cmd forbids
+            # routing to this action (see Phase 4 note in ai/prompts.py).
+            # Kept here only so a stray/legacy call doesn't hard-crash.
+            resp = "⚠️ Use the dedicated /agent_unlock <password> command — never send your master password as a chat message."
 
         # HELP / CHAT / CLARIFY
         elif action == "help":
@@ -468,8 +475,59 @@ async def agent_unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # -------------------------------------------------------------------
+# report_summary_cmd — direct slash command (bypasses NL parser entirely,
+# same as any other curated command; also reachable via NL as report.summary)
+# -------------------------------------------------------------------
+async def report_summary_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_whitelisted(update.effective_user.id):
+        await update.message.reply_text("⛔ Unauthorized")
+        return
+    from backend.database import async_session
+    async with async_session() as db:
+        try:
+            response = await handle_report_summary(update.effective_user.id, context.args or [], db)
+        except Exception as e:
+            logger.exception("report_summary_cmd failed: %s", e)
+            response = f"❌ Error: {e}"
+    await send_long_message(update, response or "✅ Done.")
+
+
+# -------------------------------------------------------------------
 # Natural language fallback
 # -------------------------------------------------------------------
+async def _parse_and_dispatch_nl(user_id: int, raw_text: str, db) -> str:
+    """
+    Shared by fallback_nl and unknown_command_handler (Phase 4): runs the NL
+    parser with conversation context + entity index, resolves any fuzzy
+    entity references in the result, and records the turn for future context.
+    Extracted into one function so both callers get identical Phase 4
+    behavior instead of two copies drifting apart.
+    """
+    parsed = await parse_natural_language(raw_text, db=db, user_id=user_id)
+    if parsed.get("action") == "error":
+        return f"⚠️ {parsed.get('clarification_needed','Could not parse request.')}"
+
+    action_params = dict(parsed.get("parameters", {}) or {})
+    action = parsed.get("action", "")
+    if action == "chat":
+        action_params["chat_reply"] = parsed.get("chat_reply") or ""
+    elif action == "clarify":
+        action_params["clarification_needed"] = parsed.get("clarification_needed") or ""
+
+    # Phase 4: fuzzy entity resolution — turn "my main wallet" style params
+    # into real numeric ids, or downgrade to a clarify message if ambiguous.
+    resolved = await resolve_entities(db, action, action_params)
+    if "_clarify" in resolved:
+        resp = f"❓ {resolved['_clarify']}"
+        record_turn(user_id, raw_text, "clarify", {}, reply_summary=resp)
+        return resp
+    action_params = resolved
+
+    resp = await dispatch_action(user_id, action, action_params, db)
+    record_turn(user_id, raw_text, action, action_params, reply_summary=resp)
+    return resp
+
+
 async def fallback_nl(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_whitelisted(update.effective_user.id):
         return
@@ -505,23 +563,10 @@ async def fallback_nl(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Action cancelled.")
         return
 
-    parsed = await parse_natural_language(update.message.text)
-    if parsed.get("action") == "error":
-        await update.message.reply_text(f"⚠️ {parsed.get('clarification_needed','Could not parse request.')}")
-        return
-    # Merge top-level fields into params so dispatch_action can access them.
-    # chat_reply and clarification_needed live at the top level of the parsed
-    # JSON (siblings of "parameters"), but dispatch_action reads them from params.
-    action_params = dict(parsed.get("parameters", {}) or {})
-    action = parsed.get("action", "")
-    if action == "chat":
-        action_params["chat_reply"] = parsed.get("chat_reply") or ""
-    elif action == "clarify":
-        action_params["clarification_needed"] = parsed.get("clarification_needed") or ""
     from backend.database import async_session
     async with async_session() as db:
-        resp = await dispatch_action(user_id, action, action_params, db)
-    await update.message.reply_text(resp or "✅ Done.")
+        resp = await _parse_and_dispatch_nl(user_id, raw_text, db)
+    await send_long_message(update, resp or "✅ Done.")
 
 
 # -------------------------------------------------------------------
@@ -534,21 +579,10 @@ async def unknown_command_handler(update: Update, context: ContextTypes.DEFAULT_
     text = update.message.text.lstrip("/").replace("_", " ")
     if context.args:
         text = f"{text} {' '.join(context.args)}"
-    parsed = await parse_natural_language(text)
-    if parsed.get("action") == "error":
-        await update.message.reply_text(f"⚠️ {parsed.get('clarification_needed','Unknown command.')}\n\nTry /help")
-        return
-    # Merge top-level fields into params — same fix as fallback_nl above.
-    action_params = dict(parsed.get("parameters", {}) or {})
-    action = parsed.get("action", "")
-    if action == "chat":
-        action_params["chat_reply"] = parsed.get("chat_reply") or ""
-    elif action == "clarify":
-        action_params["clarification_needed"] = parsed.get("clarification_needed") or ""
     from backend.database import async_session
     async with async_session() as db:
-        resp = await dispatch_action(user_id, action, action_params, db)
-    await update.message.reply_text(resp or "✅ Done.")
+        resp = await _parse_and_dispatch_nl(user_id, text, db)
+    await send_long_message(update, resp or "✅ Done.")
 
 
 # -------------------------------------------------------------------
@@ -563,6 +597,7 @@ def build_bot():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", commands_cmd))
     app.add_handler(CommandHandler("agent_unlock", agent_unlock_cmd))
+    app.add_handler(CommandHandler("report_summary", report_summary_cmd))
 
     # All other commands via make_cmd (auto-detects signature)
     handlers = [
@@ -685,7 +720,7 @@ async def start_bot():
         ("wallet_failing",      "Show failing wallets"),
         ("project_list",        "List all projects"),
         ("project_add",         "Add a project (guided setup)"),
-        ("project_status",      "Project eligibility"),
+        ("project_status",      "Project eligibility + status"),
         ("project_approve",     "AI-review and activate a project"),
         ("task_list",           "List task configs"),
         ("task_trigger",        "Trigger a task now"),
@@ -698,6 +733,7 @@ async def start_bot():
         ("report_eligibility",  "Eligibility progress"),
         ("report_daily_progress","Daily tx vs target"),
         ("report_server",       "Server RAM/CPU/workers"),
+        ("report_summary",      "AI-narrated summary"),
         ("gas_price",           "Current gas price"),
         ("tx_stuck",            "List stuck transactions"),
         ("nonce_release_all",   "Release all stuck nonces ⚠️"),
