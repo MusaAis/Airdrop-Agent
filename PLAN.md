@@ -127,8 +127,10 @@ Next up: Phase 7 — website build-out for everything moved off Telegram, don't 
 - Wallets that reach the hard `cooldown` status (3 failures) are still never auto-recovered (pre-existing; the AI pause exists to avoid reaching it for systemic causes).
 - `project_priority` reduces only; it does not restore priority when the project recovers.
 - `SwapTask` uses `self.token_decimals` (18) for every input token, so token->token swaps of 6-decimal tokens (USDC/USDT) compute a wrong amount. Needs a decimals lookup before ERC20 swaps are trusted.
+**fixed**
+SwapTask decimals fixed in swap.py
 
-## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's)
+## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
 .........
 
 **Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase(with short description of each phase).
