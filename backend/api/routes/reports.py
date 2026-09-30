@@ -88,14 +88,3 @@ async def export_table(table: str, _user: dict = Depends(verify_token), db: Asyn
         raise HTTPException(400, "Table not supported")
     csv_data = await export_csv(db, table)
     return PlainTextResponse(content=csv_data, media_type="text/csv", headers={"Content-Disposition": f"attachment; filename={table}.csv"})
-@router.get("/performance/avg-confirmation/{chain_id}")
-async def avg_confirmation(chain_id: int, _user: dict = Depends(verify_token), hours: int = 24):
-    return await get_avg_confirmation_time(chain_id, hours)
-
-@router.get("/performance/worker-utilization")
-async def worker_utilization(_user: dict = Depends(verify_token)):
-    return await get_worker_utilization()
-
-@router.get("/performance/rpc-latency/{chain_id}")
-async def rpc_latency(chain_id: int, _user: dict = Depends(verify_token)):
-    return await get_rpc_latency_percentiles(chain_id)
