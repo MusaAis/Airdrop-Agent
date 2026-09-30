@@ -7,6 +7,7 @@ APScheduler setup for all periodic background jobs:
 - Gas history sampling (every 10 minutes)
 - Contract upgrade check (every 4 hours)
 - Failure cluster analysis + alerts (every 10 minutes, Phase 5)
+- AI autonomy cycle (every 10 minutes, offset by 2 min, Phase 6)
 
 Discovery scanning and encrypted DB backups were removed (see PLAN.md).
 """
@@ -143,6 +144,18 @@ async def _run_failure_analysis():
         logger.error(f"Failure analysis error: {e}")
 
 
+async def _run_ai_autonomy():
+    """Phase 6 (§5.3): propose -> AI review gate -> apply/suggest, plus
+    auto-resume of AI-paused wallets. No-op while frozen or in emergency stop."""
+    try:
+        from backend.core.autonomy import run_autonomy_cycle
+        stats = await run_autonomy_cycle()
+        if stats and not stats.get("skipped") and any(stats.values()):
+            logger.info(f"AI autonomy cycle: {stats}")
+    except Exception as e:
+        logger.error(f"AI autonomy error: {e}")
+
+
 async def _run_daily_summary():
     try:
         from backend.telegram.alerts import send_daily_summary
@@ -189,6 +202,12 @@ def start_scheduler():
     sched.add_job(_run_gas_sample,     IntervalTrigger(minutes=10),  id="gas_sample",       replace_existing=True)
     sched.add_job(_run_contract_check, IntervalTrigger(hours=4),     id="contract_check",   replace_existing=True)
     sched.add_job(_run_failure_analysis, IntervalTrigger(minutes=10), id="failure_analysis", replace_existing=True)
+    # Offset by 2 min so it runs after the failure-cluster alerts have gone out.
+    sched.add_job(
+        _run_ai_autonomy,
+        IntervalTrigger(minutes=10, start_date=datetime.now(timezone.utc) + timedelta(minutes=2)),
+        id="ai_autonomy", replace_existing=True,
+    )
 
     if not sched.running:
         sched.start()

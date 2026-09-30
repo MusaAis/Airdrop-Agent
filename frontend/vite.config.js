@@ -12,6 +12,7 @@ export default defineConfig({
       '/projects': 'http://localhost:8002',
       '/faucets': 'http://localhost:8002',
       '/ai': 'http://localhost:8002',
+      '/autonomy': 'http://localhost:8002',
       '/reports': 'http://localhost:8002',
       '/ws': {
         target: 'ws://localhost:8002',

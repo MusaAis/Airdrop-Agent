@@ -1,12 +1,13 @@
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks
+from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks, autonomy
 from backend.database import init_db, async_session
 from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD
 from sqlalchemy import select
 from backend.models import User
 from backend.security.auth import get_password_hash
+import backend.core.autonomy_models  # noqa: F401  (registers ai_actions tables before init_db)
 import uvicorn
 
 app = FastAPI(title="Airdrop Agent", version="0.1.0")
@@ -33,6 +34,7 @@ app.include_router(projects.router)
 app.include_router(ai.router)
 app.include_router(reports.router)
 app.include_router(webhooks.router)
+app.include_router(autonomy.router)
 
 @app.on_event("startup")
 async def startup():
@@ -43,6 +45,11 @@ async def startup():
         if not user:
             session.add(User(username="admin", hashed_password=get_password_hash(MASTER_PASSWORD)))
             await session.commit()
+
+    # Phase 6: restore the persisted AI-autonomy freeze flag BEFORE the
+    # scheduler starts, so a restart can never silently re-enable autonomy.
+    from backend.core.autonomy import load_autonomy_state
+    await load_autonomy_state()
 
     # Start APScheduler background jobs (faucet check, discovery, sybil
     # re-score, log archival, daily summary, gas sampling, contract check,

@@ -4,22 +4,30 @@ from backend.telegram.whitelist import is_whitelisted
 logger = logging.getLogger("airdrop.tg.ai")
 
 
+def _action_ref(arg: str):
+    """'A5' / 'a5' -> 5 (an autonomous-action id); anything else -> None
+    (a plain number is an AIValidation id, as before Phase 6)."""
+    a = (arg or "").strip()
+    if a[:1] in ("A", "a") and a[1:].isdigit():
+        return int(a[1:])
+    return None
+
+
 async def handle_ai_autonomy_off(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    from backend.core.kill_switch import set_ai_autonomy_paused
-    set_ai_autonomy_paused(True)
+    from backend.core.autonomy import set_autonomy_paused
+    await set_autonomy_paused(db, True, f"telegram:{user_id}")
     return (
-        "🧊 AI autonomy frozen. The AI-managed task/wallet engine will not make "
-        "any autonomous changes until /ai_autonomy_on. Normal task execution "
-        "and manual commands are unaffected."
+        "🧊 AI autonomy frozen (saved — survives restarts). The AI will not make any autonomous "
+        "changes until /ai_autonomy_on. Normal task execution and manual commands are unaffected."
     )
 
 
 async def handle_ai_autonomy_on(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    from backend.core.kill_switch import set_ai_autonomy_paused
-    set_ai_autonomy_paused(False)
-    return "✅ AI autonomy resumed. The AI-managed task/wallet engine may act autonomously again."
+    from backend.core.autonomy import set_autonomy_paused
+    await set_autonomy_paused(db, False, f"telegram:{user_id}")
+    return "✅ AI autonomy resumed. It may pause wallets, tune gas multipliers and disable failing tasks again (within its limits)."
 
 
 async def handle_ai_log(user_id, args, db, confirmation=None):
@@ -54,8 +62,15 @@ async def handle_ai_validate(user_id, args, db, confirmation=None):
 
 
 async def handle_ai_approve(user_id, args, db, confirmation=None):
+    """/ai_approve <validation_id>  — approve an AI validation
+       /ai_approve A<id>            — apply an AI-suggested autonomous action"""
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    if not args: return "Usage: /ai_approve <validation_id>"
+    if not args: return "Usage: /ai_approve <validation_id>  or  /ai_approve A<action_id>"
+    ref = _action_ref(args[0])
+    if ref is not None:
+        from backend.core.autonomy import approve_action
+        _ok, msg = await approve_action(db, ref)
+        return msg
     from backend.models import AIValidation
     val = await db.get(AIValidation, int(args[0]))
     if not val: return f"Validation {args[0]} not found."
@@ -66,8 +81,15 @@ async def handle_ai_approve(user_id, args, db, confirmation=None):
 
 
 async def handle_ai_reject(user_id, args, db, confirmation=None):
+    """/ai_reject <validation_id>  — reject an AI validation
+       /ai_reject A<id>            — dismiss an AI suggestion, or UNDO an applied autonomous action"""
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    if not args: return "Usage: /ai_reject <validation_id>"
+    if not args: return "Usage: /ai_reject <validation_id>  or  /ai_reject A<action_id>"
+    ref = _action_ref(args[0])
+    if ref is not None:
+        from backend.core.autonomy import undo_action
+        _ok, msg = await undo_action(db, ref)
+        return msg
     from backend.models import AIValidation
     val = await db.get(AIValidation, int(args[0]))
     if not val: return f"Validation {args[0]} not found."
@@ -80,16 +102,33 @@ async def handle_ai_reject(user_id, args, db, confirmation=None):
 async def handle_ai_pending(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     from backend.models import AIValidation
+    from backend.core.autonomy import list_actions
     from sqlalchemy import select
     pending = (await db.execute(
         select(AIValidation).where(AIValidation.requires_human == True, AIValidation.resolved == False)
     )).scalars().all()
-    if not pending:
-        return "✅ No validations awaiting human review."
-    lines = [f"⚠️ {len(pending)} validations need review:"]
-    for v in pending:
-        lines.append(f"ID {v.id}: {v.task_type} | agreement={v.agreement_score}%")
-    lines.append("\nUse /ai_approve <id> or /ai_reject <id>")
+    suggestions = await list_actions(db, limit=10, status="suggested")
+    recent = await list_actions(db, limit=10, status="applied", since_hours=24)
+
+    lines = []
+    if pending:
+        lines.append(f"⚠️ {len(pending)} validations need review:")
+        for v in pending:
+            lines.append(f"ID {v.id}: {v.task_type} | agreement={v.agreement_score}%")
+        lines.append("Use /ai_approve <id> or /ai_reject <id>")
+    if suggestions:
+        if lines: lines.append("")
+        lines.append(f"🤔 {len(suggestions)} AI suggestion(s) awaiting your approval:")
+        for a in suggestions:
+            lines.append(f"A{a['id']}: {a['summary']}")
+        lines.append("Use /ai_approve A<id> or /ai_reject A<id>")
+    if recent:
+        if lines: lines.append("")
+        lines.append("🤖 Autonomous actions in the last 24h (undo with /ai_reject A<id>):")
+        for a in recent:
+            lines.append(f"A{a['id']}: {a['summary']}")
+    if not lines:
+        return "✅ Nothing awaiting review, no autonomous actions in the last 24h."
     return "\n".join(lines)
 
 
@@ -99,6 +138,7 @@ async def handle_ai_status(user_id, args, db, confirmation=None):
     groq_ok = "✅ set" if GROQ_API_KEY else "❌ missing"
     gemini_ok = "✅ set" if GEMINI_API_KEY else "❌ missing"
     from backend.models import AIValidation
+    from backend.core.autonomy import autonomy_summary
     from sqlalchemy import select, func
     total = (await db.execute(select(func.count()).select_from(AIValidation))).scalar() or 0
     pending = (await db.execute(
@@ -106,12 +146,19 @@ async def handle_ai_status(user_id, args, db, confirmation=None):
             AIValidation.requires_human == True, AIValidation.resolved == False
         )
     )).scalar() or 0
+    s = await autonomy_summary(db)
+    state = "🧊 FROZEN" if s["paused"] else "✅ active"
+    counts = s["last_24h"]
+    acts = ", ".join(f"{n} {k}" for k, n in counts.items()) or "none"
     return (
         f"🧠 AI Status\n"
         f"Groq API: {groq_ok}\n"
         f"Gemini API: {gemini_ok}\n"
         f"Total validations: {total}\n"
-        f"Pending review: {pending}"
+        f"Pending review: {pending}\n"
+        f"Autonomy: {state}\n"
+        f"Autonomous actions (24h): {acts}\n"
+        f"Suggestions awaiting approval: {s['pending_suggestions']}"
     )
 
 

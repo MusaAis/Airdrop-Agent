@@ -7,15 +7,19 @@ Design (same principle as reports/analyst.py):
     decides anything and never produces a number; it only narrates a fact
     pack that code already verified, and only for SYSTEMIC clusters (saves
     Gemini/Groq quota; transient clusters use a fixed template).
-  - Phase 6's autonomous engine should consume find_clusters() directly: each
-    cluster dict already carries category, chain, wallets, projects and the
-    transient/systemic verdict.
+  - Phase 6's autonomous engine (core/autonomy.py) consumes find_clusters()
+    directly: each cluster dict carries category, chain, wallets, projects,
+    per-wallet / per-task counts and the transient/systemic verdict.
 
 Cluster = >= CLUSTER_MIN_EVENTS events of the same category on the same chain
 within CLUSTER_WINDOW_MINUTES. The same cluster alerts at most once per
 ALERT_COOLDOWN, unless its event count has doubled since the last alert.
 Alert dedup state is in memory (lost on restart, like the wizard/confirmation
 state) — worst case is one repeated alert after a restart.
+
+Phase 6 changes: new category `gas_underpriced` (tx rejected because the gas
+price was too low — the signal that lets the AI raise a wallet's gas
+multiplier), and clusters now include `wallet_counts` and `task_stats`.
 """
 import json
 import logging
@@ -50,6 +54,7 @@ _LABELS = {
     "memory_pressure": "server memory pressure",
     "task_timeout": "task timeout",
     "low_gas": "insufficient gas token",
+    "gas_underpriced": "gas price too low (underpriced)",
     "rpc_error": "RPC / network error",
     "nonce_error": "nonce problem",
     "simulation_revert": "simulation reverted",
@@ -66,6 +71,7 @@ _HINTS = {
     "memory_pressure": "Dispatch was paused because server RAM crossed the alert threshold.",
     "task_timeout": "Tasks exceeded the 8 minute limit. Usually a slow RPC or a congested chain.",
     "low_gas": "Wallets do not hold enough gas token. If many wallets are affected, check that the faucet and the gas wallet are working.",
+    "gas_underpriced": "Transactions were rejected because the gas price was too low for current network conditions. Raising the affected wallets' gas multiplier normally fixes this (the AI autonomy engine may do it within its 0.7x-1.8x bounds).",
     "rpc_error": "RPC calls are failing. Check the chain's RPC URLs (/chain_status).",
     "nonce_error": "Nonce locks could not be acquired or the nonce was rejected. Check for stuck transactions (/tx_stuck).",
     "simulation_revert": "Pre-broadcast simulation reverted, so nothing was sent. The task parameters or contract are likely wrong.",
@@ -87,6 +93,9 @@ def classify_error_text(text: str) -> str:
         return "memory_pressure"
     if "nonce" in t:
         return "nonce_error"
+    if any(k in t for k in ("underpriced", "fee too low", "gas price too low",
+                            "max fee per gas less than")):
+        return "gas_underpriced"
     if "low_gas" in t or "insufficient funds" in t or "insufficient gas" in t or "gas required exceeds" in t:
         return "low_gas"
     if "approval" in t or "allowance" in t:
@@ -182,9 +191,18 @@ async def find_clusters(
         if len(items) < min_events:
             continue
         reasons: Dict[str, int] = {}
+        wallet_counts: Dict[int, int] = {}
+        task_raw: Dict[int, dict] = {}
         for r in items:
             key = (r.reason or "")[:80]
             reasons[key] = reasons.get(key, 0) + 1
+            if r.wallet_id is not None:
+                wallet_counts[r.wallet_id] = wallet_counts.get(r.wallet_id, 0) + 1
+            if r.task_config_id is not None:
+                t = task_raw.setdefault(r.task_config_id, {"count": 0, "wallets": set()})
+                t["count"] += 1
+                if r.wallet_id is not None:
+                    t["wallets"].add(r.wallet_id)
         c = {
             "category": category,
             "chain_id": chain_id,
@@ -195,6 +213,12 @@ async def find_clusters(
             "project_ids": sorted({r.project_id for r in items if r.project_id is not None}),
             "top_reasons": sorted(reasons.items(), key=lambda x: x[1], reverse=True)[:3],
             "window_minutes": window_minutes,
+            # Phase 6: per-target evidence for the autonomy engine
+            "wallet_counts": wallet_counts,
+            "task_stats": {
+                tid: {"count": t["count"], "distinct_wallets": len(t["wallets"])}
+                for tid, t in task_raw.items()
+            },
         }
         c["distinct_wallets"] = len(c["wallet_ids"])
         _assess(c)
