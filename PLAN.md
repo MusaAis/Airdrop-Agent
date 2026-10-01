@@ -119,7 +119,36 @@ Phase 6 (§5.3 AI-managed tasks/wallets, built on Phase 5's `find_clusters()`) i
 - `frontend/src/pages/Settings.jsx` — replace
 - `frontend/vite.config.js` — replace
 
-Next up: Phase 7 — website build-out for everything moved off Telegram, don't forget to looks at **phase 4 note about the defered future and make your decisions, whethere build it in phase 7 or not, and don't forget to put your decision in phase 7 completion note(or write its new phase not after your decisions, i mean here example if you take it now is okay, and if you didn't so write/describe its as new phase(phase 9)).
+## 0.7 Phase 7 completion notes
+Phase 7 (website build-out for what moved off Telegram, §4/§6) is done in this scope. The full visual redesign is deliberately **not** in it; it moves to Phase 9 (see decisions).
+
+**Decisions you asked me to make**
+- **Stats dashboard (deferred in Phase 4): built now.** It is read-only over data that already exists, so it carried almost no risk. `GET /stats/overview` + a `StatsOverview` section at the top of the Dashboard: project/wallet breakdowns, eligible/not-eligible counts and declared value, transactions and success rate for 24h / 7d / all time, gas spend, open alerts, AI suggestions, and a per-project rollup (tasks enabled/total, tx ok/failed, wallets used, active days, gas $, last tx).
+- **Semi-autonomous task configs: not built.** A task config needs a verified router/bridge/staking address and token addresses, and a wrong guess spends real gas or does nothing quietly. The AI would be guessing those from docs. If you still want it later, the only safe shape is draft-only (same boundary as criteria drafts): a draft is accepted only if the contract addresses are quoted verbatim in the docs AND `eth_getCode` shows code at them on the target chain, and it is saved **disabled** until a human enables it. Parked for Phase 9/11 as optional.
+- **Full redesign + remaining polish: new Phase 9.** Redesigning every page is a project of its own; doing it on top of this functional work would have made both worse.
+
+**What was built (all under `/ops`, `/stats`, `/proxies`)**
+- **Wallets**: Manage panel per wallet. Recover (cooldown/paused -> active **and failure_count reset to 0**; before, activating a cooldown wallet left it at 3 failures so one new failure put it straight back), blacklist, gas-wallet toggle, tag editor, full persona/settings editor, nonce view with release-lock and sync-from-chain.
+- **Chains**: edit RPC list (primary + fallbacks), explorer, gas token config, warning/critical balances, RPC rate limit, enable; Test RPCs; live gas status (current vs 6h average, spike flag, cheapest UTC hours); token registry list/add; delete chain.
+- **Tasks**: edit amounts, daily range, frequency, slippage, deadline, tokens, reverse tokens, dependencies (validated: same project, no self, no cycles), parameters JSON; enable/disable; **Run now** (any active wallet or random; respects emergency stop and says whether it is dry-run).
+- **Projects**: new detail page: priority, wallet cap, links, notes, **TGE / airdrop dates** (the Snapshot Calendar could never be fed before; there was no way to set them), circuit-breaker status + reset, criteria editor (add/edit/delete).
+- **Proxies**: real page. Add, assign (one proxy per wallet), activate/deactivate, test (shows exit IP + latency), delete. Passwords are masked in every API response. **Wired in**: faucet claims now go through the wallet's active proxy and fail rather than fall back to the server's own IP.
+- **System** (Settings): global dry-run toggle (replaces the old per-task dry-run command), emergency-stop status + clear, archive logs now.
+- **Fixes found on the way**: `rotate_proxy` crashed for a wallet without a proxy and *stole other wallets' proxies*; `Sybil.jsx` showed no pairs (endpoint returns a dict, page expected a list); Snapshot/Sybil used `/projects` and `/wallets` without a trailing slash (a redirect that can drop the auth header); logout left the JWT in localStorage (axios and the live-log WebSocket kept using it); an expired token (30 min, no refresh flow) failed silently. A 401 now returns you to login.
+
+**New/edited files in Phase 7**
+- `backend/api/routes/ops.py` — new
+- `backend/api/routes/stats.py` — new
+- `backend/api/routes/proxies.py` — new
+- `backend/proxy_manager.py` — replace
+- `backend/faucet/manager.py` — replace
+- `backend/main.py` — replace (also keeps Phase 6 changes)
+- `frontend/src/components/StatsOverview.jsx`, `SystemPanel.jsx`, `WalletManage.jsx` — new
+- `frontend/src/pages/ProjectDetail.jsx` — new
+- `frontend/src/pages/Proxies.jsx`, `Chains.jsx`, `Tasks.jsx` — replace
+- Patched in place by `apply_phase7_patches.py`: `api.js`, `App.jsx`, `Dashboard.jsx`, `Projects.jsx`, `Wallets.jsx`, `Settings.jsx`, `Snapshot.jsx`, `Sybil.jsx`, `vite.config.js`
+
+**next up:** phase 8
 
 ## Known, not built
 **every times you discovered somethings usefull and you didn't build/fix it, add it here and the dev team will lock at it and build it, don't forgot to add recommendations if there is any here too:**
@@ -127,13 +156,30 @@ Next up: Phase 7 — website build-out for everything moved off Telegram, don't 
 - Wallets that reach the hard `cooldown` status (3 failures) are still never auto-recovered (pre-existing; the AI pause exists to avoid reaching it for systemic causes).
 - `project_priority` reduces only; it does not restore priority when the project recovers.
 - `SwapTask` uses `self.token_decimals` (18) for every input token, so token->token swaps of 6-decimal tokens (USDC/USDT) compute a wrong amount. Needs a decimals lookup before ERC20 swaps are trusted.
-**fixed**
-SwapTask decimals fixed in swap.py
+**added in Phase 7, with recommendations**
+- **Claims page is dead**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box.
+- **Project blacklist is unenforced**: `CompletedProjectsBlacklist` was only read by the removed discovery code. Recommend: either check it in project creation (route + Telegram wizard) or drop the table and command.
+- **`DRY_RUN_MODE` env is ignored**: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
+- **Emergency stop is in memory too** and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
+- **Faucets**: `method: GET` faucets are stored but every request is sent as POST; only `{address}` can be templated. `faucet/handlers/http_post.py` is unused and passes `proxies=`, which httpx >= 0.28 removed (delete it or use `client_proxy_kwargs`).
+- **Proxies cover faucet claims only.** RPC calls and the transactions themselves still come from the server IP. Recommend: if Sybil-hardening matters, route RPC per wallet through its proxy (needs a per-wallet web3 provider). `Wallet.proxy_id` is an unused duplicate of `Proxy.wallet_id`.
+- **Sessions**: login is not remembered across a page reload and the refresh-token endpoint is never used by the frontend. Recommend: use the refresh token (httpOnly cookie) so a reload or 30-minute expiry does not force a re-login, still keeping the access token out of localStorage.
+- **`Sybil.jsx` health/Sybil scores** read `health_score`/`sybil_risk_score`, which `WalletResponse` does not return, so the grid shows "—" and 0. Recommend adding both fields to `WalletResponse`.
+- **`Claims`, `Sybil`, `Snapshot`, `Notifications`** still use the old fetch + inline-style code instead of the shared `api` client and components (redesign scope, Phase 9).
+- **Telegram wizard/`/projects` UI mismatch**: quick-add offers types (bridge, lending, dex) the wizard and prompts do not know.
+- Gas multipliers only go up; no decay (Phase 6). Wallets that reach `cooldown` are still not auto-recovered (now manually recoverable from the Manage panel). `project_priority` only reduces.
+- `SwapTask` decimals: fixed in the code (`_get_decimals` looks up the real token decimals) but the old "known, not fixed" note is still in §0.5; verify with a USDC test swap on testnet before trusting it.
 
 ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
-.........
+- **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.
+- **Audit log of manual actions** (who pressed Recover/Run now/Blacklist, when). The AI already has `ai_actions`; manual changes have none. Cheap to add and valuable once more than one person uses the panel.
+- **Per-wallet "why am I not running?" view**: combine status, active hours, daily target, cooldown, nonce lock, proxy, gas balance into one explanation. The data all exists.
+- **Backup reminder**: backups were removed by request, so show the database file size/age on the System panel and a banner if the file has not been copied for N days.
+- **Task templates** (swap/bridge/stake presets that pre-fill fields) are the safe middle ground between "manual JSON" and AI-drafted task configs.
 
-**Update cadence:** This file is updated in bulk after each completed phase, not line-by-line during a phase(with short description of each phase).
+
+## Update cadence:
+This file is updated/re-writed in bulk after each completed phase, not line-by-line during a phase(with short description of each phase).
 This is the reference document for the Airdrop-Agent rebuild: what the system does today, what's being removed and why, what's being kept, what's being improved, what's being built new, and where the project is headed after that. Use this as the source of truth during the build.
 
 ---
@@ -360,14 +406,15 @@ Ideas worth considering after the current phase, not committed to yet:
 
 ## 9. Execution phases (proposed grouping — for reference once building starts)
 
-1. **Phase 1 — Removals:** discovery system, ROI estimator, backup system, auto-claim execution, Telegram command trim
-2. **Phase 2 — Kept-feature improvements:** Sybil re-score randomized interval, AI validation scope narrowing
-3. **Phase 3 — New feature: manual project add** (§5.5) — Telegram guided flow + website wizard. **and i have forgot to a remove & edit projects in the project tab** - we need to add this when building **phase 4** edit/remove project in project tab
-4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2)
-5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6
-6. **Phase 6 — New feature: AI-managed tasks/wallets** (§5.3) — only after §7 open questions are answered
-7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more.
-8. **Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. 
-9. **Phase 8 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, security.md and the rest.
+1. **Phase 1 — Removals:** discovery system, ROI estimator, backup system, auto-claim execution, Telegram command trim. *built*
+2. **Phase 2 — Kept-feature improvements:** Sybil re-score randomized interval, AI validation scope narrowing. *built*
+3. **Phase 3 — New feature: manual project add** (§5.5) — Telegram guided flow + website wizard. **and i have forgot to a remove & edit projects in the project tab** - we need to add this when building **phase 4** edit/remove project in project tab. *built*
+4. **Phase 4 — New feature: NL improvements + AI analyst/reporting** (§5.1, §5.2). *built*
+5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6. *built*
+6. **Phase 6 — New feature: AI-managed tasks/wallets** *built*
+7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
+8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *not yet*
+9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *not yet*
+10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
 
 This grouping is a suggestion, not a commitment — order can change based on what MusaAis wants tackled first once execution begins.

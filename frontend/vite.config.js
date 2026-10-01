@@ -14,6 +14,10 @@ export default defineConfig({
       '/ai': 'http://localhost:8002',
       '/autonomy': 'http://localhost:8002',
       '/reports': 'http://localhost:8002',
+      '/ops': 'http://localhost:8002',
+      '/stats': 'http://localhost:8002',
+      '/proxies': 'http://localhost:8002',
+      '/autonomy': 'http://localhost:8002',
       '/ws': {
         target: 'ws://localhost:8002',
         ws: true

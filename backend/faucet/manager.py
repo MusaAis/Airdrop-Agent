@@ -9,20 +9,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from backend.models import Faucet, FaucetToken, FaucetRequest, Wallet, Chain
 from backend.database import async_session
+from backend.proxy_manager import get_assigned_proxy, client_proxy_kwargs
 
 logger = logging.getLogger("airdrop.faucet")
 
 
 async def _make_faucet_request(
-    url: str, wallet_address: str, body_template: dict, fallback_urls: List[str] = None
+    url: str, wallet_address: str, body_template: dict, fallback_urls: List[str] = None,
+    wallet_id: Optional[int] = None,
 ) -> dict:
-    """Make real HTTP POST to faucet, try fallback URLs on failure."""
+    """Make real HTTP POST to faucet, try fallback URLs on failure.
+
+    Phase 7: if the wallet has an active proxy assigned, the request goes through
+    it (a dead proxy fails the request rather than leaking the server's own IP,
+    which would link every wallet to one address)."""
     urls_to_try = [url] + (fallback_urls or [])
     body = json.dumps(body_template).replace("{address}", wallet_address)
 
+    proxy_kwargs = {}
+    if wallet_id is not None:
+        assigned = await get_assigned_proxy(wallet_id)
+        if assigned:
+            proxy_kwargs = client_proxy_kwargs(assigned["https"])
+
     for try_url in urls_to_try:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with httpx.AsyncClient(timeout=30, **proxy_kwargs) as client:
                 resp = await client.post(
                     try_url,
                     content=body,
@@ -99,7 +111,7 @@ async def _do_request(wallet: Wallet, chain: Chain, db: AsyncSession) -> List[di
         body_template = faucet.body_template or {"address": "{address}"}
         fallback_urls = faucet.fallback_urls if isinstance(faucet.fallback_urls, list) else []
         request_result = await _make_faucet_request(
-            faucet.url, wallet.address, body_template, fallback_urls
+            faucet.url, wallet.address, body_template, fallback_urls, wallet_id=wallet.id
         )
 
         # Get tokens this faucet provides

@@ -1,10 +1,12 @@
 import React from 'react'
 import { Card } from '../components/ui'
 import AutonomyPanel from '../components/AutonomyPanel'
+import SystemPanel from '../components/SystemPanel'
 
 export default function Settings() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <SystemPanel />
       <AutonomyPanel />
 
       <Card title="Environment">

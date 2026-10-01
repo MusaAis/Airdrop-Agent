@@ -12,9 +12,9 @@ export default function Sybil({ token }) {
     try {
       const [s, w] = await Promise.all([
         fetch(`${API_BASE}/reports/sybil`, { headers: h }).then(r => r.json()),
-        fetch(`${API_BASE}/wallets`,        { headers: h }).then(r => r.json()),
+        fetch(`${API_BASE}/wallets/`,        { headers: h }).then(r => r.json()),
       ])
-      setPairs(Array.isArray(s) ? s : []); setWallets(Array.isArray(w) ? w : [])
+      setPairs(Array.isArray(s) ? s : (s.suspicious_pairs || [])); setWallets(Array.isArray(w) ? w : [])
     } catch {}
   }, [token])
 

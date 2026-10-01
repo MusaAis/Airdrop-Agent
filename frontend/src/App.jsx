@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import ErrorBoundary from './components/ErrorBoundary'
 import Sidebar from './components/Sidebar'
@@ -11,6 +11,7 @@ import Chains from './pages/Chains'
 import Tasks from './pages/Tasks'
 import Projects from './pages/Projects'
 import AddProject from './pages/AddProject'
+import ProjectDetail from './pages/ProjectDetail'
 import Logs from './pages/Logs'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
@@ -36,7 +37,7 @@ function Shell({ token, logout }) {
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
   const location = useLocation()
-  const title = PAGE_TITLES[location.pathname] || 'Airdrop Agent'
+  const title = PAGE_TITLES[location.pathname] || (/^\/projects\/\d+$/.test(location.pathname) ? 'Project' : 'Airdrop Agent')
 
   return (
     <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bg)' }}>
@@ -53,6 +54,7 @@ function Shell({ token, logout }) {
             <Route path="/tasks" element={<Tasks token={token} />} />
             <Route path="/projects" element={<Projects token={token} />} />
             <Route path="/projects/new" element={<AddProject token={token} />} />
+            <Route path="/projects/:id" element={<ProjectDetail />} />
             <Route path="/logs" element={<Logs token={token} />} />
             <Route path="/reports" element={<Reports token={token} />} />
             <Route path="/faucets" element={<Faucets token={token} />} />
@@ -76,7 +78,12 @@ function App() {
   const [token, setToken] = useState(null)
 
   const login  = (jwt) => setToken(jwt)
-  const logout = () => setToken(null)
+  const logout = () => { localStorage.removeItem('token'); setToken(null) }
+  useEffect(() => {
+    const h = () => setToken(null)
+    window.addEventListener('auth:expired', h)
+    return () => window.removeEventListener('auth:expired', h)
+  }, [])
 
   if (!token) return <Login onLogin={login} />
 

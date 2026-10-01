@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
 import Spinner from '../components/Spinner'
+import WalletManage from '../components/WalletManage'
 import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
 
 function truncate(addr) {
@@ -17,6 +18,7 @@ export default function Wallets({ token }) {
   const [initialLoad, setInitialLoad] = useState(true)
   const [actionMessage, setActionMessage] = useState('')
   const [copiedId, setCopiedId] = useState(null)
+  const [managing, setManaging] = useState(null)
 
   const fetchWallets = async () => {
     setLoading(true)
@@ -138,6 +140,8 @@ export default function Wallets({ token }) {
       {loading && !initialLoad && <Spinner inline label="Working…" />}
       {actionMessage && <p className="error">{actionMessage}</p>}
 
+      {managing && <WalletManage wallet={wallets.find(x => x.id === managing)} onChanged={fetchWallets} onClose={() => setManaging(null)} />}
+
       <Card title="All wallets">
         <div className="table-scroll"><table>
           <thead>
@@ -163,6 +167,7 @@ export default function Wallets({ token }) {
                   <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
                     {w.status !== 'active' && <button className="sm" onClick={() => toggleStatus(w.id, 'active')}>Activate</button>}
                     {w.status !== 'paused' && <button className="sm" onClick={() => toggleStatus(w.id, 'paused')}>Pause</button>}
+                    <button className="sm" onClick={() => setManaging(managing === w.id ? null : w.id)}>Manage</button>
                     <button className="sm danger" onClick={() => toggleStatus(w.id, 'archived')}>Archive</button>
                   </div>
                 </td>

@@ -7,7 +7,7 @@ export default function Snapshot({ token }) {
 
   const load = useCallback(async () => {
     try {
-      const d = await fetch(`${API_BASE}/projects`, { headers: h }).then(r => r.json())
+      const d = await fetch(`${API_BASE}/projects/`, { headers: h }).then(r => r.json())
       const today = new Date()
       const withDays = (Array.isArray(d) ? d : [])
         .filter(p => p.airdrop_date || p.tge_date)

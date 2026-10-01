@@ -1,7 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks, autonomy
+from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks, autonomy, ops, stats, proxies
 from backend.database import init_db, async_session
 from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD
 from sqlalchemy import select
@@ -35,6 +35,9 @@ app.include_router(ai.router)
 app.include_router(reports.router)
 app.include_router(webhooks.router)
 app.include_router(autonomy.router)
+app.include_router(ops.router)       # Phase 7: control-panel endpoints
+app.include_router(stats.router)     # Phase 7: stats overview
+app.include_router(proxies.router)   # Phase 7: proxy management
 
 @app.on_event("startup")
 async def startup():
@@ -51,9 +54,9 @@ async def startup():
     from backend.core.autonomy import load_autonomy_state
     await load_autonomy_state()
 
-    # Start APScheduler background jobs (faucet check, discovery, sybil
-    # re-score, log archival, daily summary, gas sampling, contract check,
-    # nightly backup)
+    # Start APScheduler background jobs (faucet check, sybil re-score, log
+    # archival, daily summary, gas sampling, contract check, failure analysis,
+    # AI autonomy)
     from backend.core.scheduler import start_scheduler
     start_scheduler()
 

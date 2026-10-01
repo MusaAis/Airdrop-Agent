@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import api from '../api'
 import WorkerSlotView from '../components/WorkerSlotView'
 import ServerStatus from '../components/ServerStatus'
+import StatsOverview from '../components/StatsOverview'
 import { Card, Badge, EmptyState, StatTile } from '../components/ui'
 
 export default function Dashboard({ token }) {
@@ -57,6 +58,8 @@ export default function Dashboard({ token }) {
           />
         </Card>
       </div>
+
+      <StatsOverview />
 
       <div className="grid">
         <Card title="Agent overview" action={<Badge status={isRunning ? 'active' : 'paused'}>{agentStatus.status || 'unknown'}</Badge>}>

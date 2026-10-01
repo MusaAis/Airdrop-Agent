@@ -208,7 +208,7 @@ export default function Projects() {
             <tbody>
               {projects.map(p => (
                 <tr key={p.id} style={{ opacity: p.status === 'archived' ? 0.55 : 1 }}>
-                  <td style={{ fontWeight: 600 }}>{p.name}</td>
+                  <td style={{ fontWeight: 600 }}><Link to={`/projects/${p.id}`}>{p.name}</Link></td>
                   <td><span className="badge neutral"><span className="badge-dot" />{p.type}</span></td>
                   <td className="mono">{p.priority}</td>
                   <td><Badge status={p.status === 'active' ? 'active' : p.status === 'stopped' || p.status === 'archived' ? 'failed' : p.status}>{p.status}</Badge></td>
