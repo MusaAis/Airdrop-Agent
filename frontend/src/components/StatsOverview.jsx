@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
-import { Card, Badge, EmptyState, StatTile } from './ui'
+import { Card, Badge, EmptyState, StatTile, DataTable } from './ui'
 
 const fmt = n => (n == null ? '—' : Number(n).toLocaleString())
 
@@ -42,8 +42,8 @@ export default function StatsOverview() {
   const sr = x => (x.success_rate == null ? '—' : `${x.success_rate}%`)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 16 }}>
+    <div className="stack">
+      <div className="grid-stats">
         <Card><StatTile label="Projects" value={d.projects.total} sub={`${d.projects.by_status.active || 0} active`} /></Card>
         <Card><StatTile label="Wallets" value={d.wallets.total} tone="violet" sub={`${d.wallets.by_status.active || 0} active · ${d.wallets.gas_wallets} gas`} /></Card>
         <Card><StatTile label="Tx 24h" value={fmt(t24.total)} tone="signal" sub={`${sr(t24)} success · $${t24.gas_usd} gas`} /></Card>
@@ -69,32 +69,28 @@ export default function StatsOverview() {
         {d.per_project.length === 0 ? (
           <EmptyState icon="◫" title="No projects yet" hint="Add a project to see its numbers here." />
         ) : (
-          <div className="table-scroll"><table>
-            <thead><tr>
-              <th>Project</th><th>Status</th><th>Eligibility</th><th>Tasks</th>
-              <th style={{ textAlign: 'right' }}>Tx ok / fail</th><th style={{ textAlign: 'right' }}>Wallets</th>
-              <th style={{ textAlign: 'right' }}>Active days</th><th style={{ textAlign: 'right' }}>Gas $</th><th>Last tx</th>
-            </tr></thead>
-            <tbody>
-              {d.per_project.map(p => (
-                <tr key={p.id} style={{ opacity: p.status === 'archived' ? 0.55 : 1 }}>
-                  <td style={{ fontWeight: 600 }}>{p.name}</td>
-                  <td><Badge status={p.status === 'active' ? 'active' : p.status === 'stopped' || p.status === 'archived' ? 'failed' : p.status}>{p.status}</Badge></td>
-                  <td>
-                    <Badge status={p.eligibility_status === 'eligible' ? 'success' : p.eligibility_status === 'not_eligible' ? 'failed' : 'neutral'}>
-                      {p.eligibility_status}{p.eligibility_value_usd ? ` · $${Number(p.eligibility_value_usd).toFixed(0)}` : ''}
-                    </Badge>
-                  </td>
-                  <td className="mono">{p.tasks_enabled}/{p.tasks_total}</td>
-                  <td className="mono" style={{ textAlign: 'right' }}>{p.tx_confirmed} / {p.tx_failed}</td>
-                  <td className="mono" style={{ textAlign: 'right' }}>{p.wallets}</td>
-                  <td className="mono" style={{ textAlign: 'right' }}>{p.active_days}</td>
-                  <td className="mono" style={{ textAlign: 'right' }}>${p.gas_usd}</td>
-                  <td style={{ fontSize: 12, color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{ago(p.last_tx_at)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table></div>
+          <DataTable
+            rows={d.per_project}
+            rowStyle={p => (p.status === 'archived' ? { opacity: 0.55 } : undefined)}
+            columns={[
+              { key: 'name', label: 'Project', render: p => <span style={{ fontWeight: 600 }}>{p.name}</span> },
+              { key: 'status', label: 'Status', render: p => <Badge status={p.status}>{p.status}</Badge> },
+              {
+                key: 'elig', label: 'Eligibility',
+                render: p => (
+                  <Badge status={p.eligibility_status === 'eligible' ? 'success' : p.eligibility_status === 'not_eligible' ? 'failed' : 'neutral'}>
+                    {p.eligibility_status}{p.eligibility_value_usd ? ` · $${Number(p.eligibility_value_usd).toFixed(0)}` : ''}
+                  </Badge>
+                ),
+              },
+              { key: 'tasks', label: 'Tasks', render: p => <span className="mono">{p.tasks_enabled}/{p.tasks_total}</span> },
+              { key: 'tx', label: 'Tx ok / fail', num: true, render: p => <span className="mono">{p.tx_confirmed} / {p.tx_failed}</span> },
+              { key: 'wallets', label: 'Wallets', num: true, render: p => <span className="mono">{p.wallets}</span> },
+              { key: 'days', label: 'Active days', num: true, render: p => <span className="mono">{p.active_days}</span> },
+              { key: 'gas', label: 'Gas $', num: true, render: p => <span className="mono">${p.gas_usd}</span> },
+              { key: 'last', label: 'Last tx', render: p => <span className="faint" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{ago(p.last_tx_at)}</span> },
+            ]}
+          />
         )}
       </Card>
     </div>

@@ -1,7 +1,7 @@
 import asyncio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks, autonomy, ops, stats, proxies
+from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, webhooks, autonomy, ops, stats, proxies, claims
 from backend.database import init_db, async_session
 from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD
 from sqlalchemy import select
@@ -39,6 +39,7 @@ app.include_router(autonomy.router)
 app.include_router(ops.router)       # Phase 7: control-panel endpoints
 app.include_router(stats.router)     # Phase 7: stats overview
 app.include_router(proxies.router)   # Phase 7: proxy management
+app.include_router(claims.router)    # Phase 9: read-only claim scanner
 
 @app.on_event("startup")
 async def startup():

@@ -1,8 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import api from '../api'
 import { Card, Badge } from './ui'
+import { useConfirm } from './Confirm'
 
 export default function SystemPanel() {
+  const confirm = useConfirm()
   const [s, setS] = useState(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
@@ -20,7 +22,7 @@ export default function SystemPanel() {
     setS(r.data)
   })
   const clearStop = () => run(async () => {
-    if (!window.confirm('Clear the emergency stop? Start the agent afterwards if it is stopped.')) return
+    if (!(await confirm({ title: 'Clear the emergency stop?', message: 'Start the agent afterwards if it is stopped.', confirmLabel: 'Clear stop' }))) return
     const r = await api.post('/ops/system/emergency/clear')
     setS(r.data); setMsg(r.data.message)
   })

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
-import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
+import { Card, Badge, EmptyState, DataTable, PageHeader } from '../components/ui'
 
 const err = e => e?.response?.data?.detail || 'Request failed.'
 const n = v => (v === '' || v == null ? undefined : Number(v))
@@ -94,21 +94,24 @@ function TaskEditor({ t, wallets, onSaved }) {
 export default function Tasks() {
   const [projects, setProjects] = useState([])
   const [wallets, setWallets] = useState([])
-  const [selectedProj, setSelectedProj] = useState(null)
+  const [selectedProj, setSelectedProj] = useState('')
   const [tasks, setTasks] = useState([])
   const [loadingTasks, setLoadingTasks] = useState(false)
   const [open, setOpen] = useState(null)
   const [msg, setMsg] = useState('')
 
   useEffect(() => {
-    api.get('/projects/').then(r => setProjects(r.data))
+    api.get('/projects/').then(r => setProjects(r.data)).catch(() => {})
     api.get('/wallets/').then(r => setWallets(r.data)).catch(() => {})
   }, [])
 
   const loadTasks = async (projId) => {
-    if (!projId) { setSelectedProj(null); return }
-    setSelectedProj(projId); setLoadingTasks(true); setOpen(null)
-    try { setTasks((await api.get(`/projects/${projId}/tasks`)).data) } finally { setLoadingTasks(false) }
+    setSelectedProj(projId)
+    if (!projId) { setTasks([]); return }
+    setLoadingTasks(true); setOpen(null); setMsg('')
+    try { setTasks((await api.get(`/projects/${projId}/tasks`)).data) }
+    catch (e) { setMsg(err(e)) }
+    finally { setLoadingTasks(false) }
   }
   const toggle = async (t) => {
     setMsg('')
@@ -116,13 +119,22 @@ export default function Tasks() {
   }
   const selectedName = projects.find(p => String(p.id) === String(selectedProj))?.name
 
+  const columns = [
+    { key: 'id', label: 'ID', render: t => <span className="mono muted">{t.id}</span> },
+    { key: 'type', label: 'Type', render: t => t.task_type },
+    { key: 'amt', label: 'Min / Max', render: t => <span className="mono">{t.min_amount} – {t.max_amount}</span> },
+    { key: 'daily', label: 'Daily tx', render: t => <span className="mono">{t.daily_tx_min}–{t.daily_tx_max}</span> },
+    { key: 'deps', label: 'Deps', render: t => <span className="mono">{(t.dependency_task_ids || []).join(', ') || '—'}</span> },
+    { key: 'enabled', label: 'Enabled', render: t => <button className="ghost sm" onClick={() => toggle(t)}><Badge status={t.enabled}>{t.enabled ? 'Enabled' : 'Disabled'}</Badge></button> },
+    { key: 'edit', label: '', actions: true, render: t => <button className="sm" onClick={() => setOpen(open === t.id ? null : t.id)}>{open === t.id ? 'Close' : 'Edit'}</button> },
+  ]
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <Card title="Task configurations">
-        <p style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: -8, marginBottom: 14 }}>
-          Choose a project, then edit its tasks. New tasks are created from Projects → Guided setup.
-        </p>
-        <select onChange={e => loadTasks(e.target.value)} defaultValue="" style={{ minWidth: 240 }}>
+    <div className="stack">
+      <PageHeader title="Tasks" subtitle="Choose a project, then edit its task configurations. New tasks are created from Projects → Guided setup." />
+
+      <Card>
+        <select value={selectedProj} onChange={e => loadTasks(e.target.value)} style={{ minWidth: 240, width: '100%', maxWidth: 420 }}>
           <option value="">Select a project…</option>
           {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
@@ -131,27 +143,12 @@ export default function Tasks() {
       {selectedProj && (
         <Card title={`Tasks · ${selectedName || `Project ${selectedProj}`}`}>
           {msg && <div className="error" style={{ marginBottom: 10 }}>{msg}</div>}
-          <div className="table-scroll"><table>
-            <thead><tr><th>ID</th><th>Type</th><th>Min / Max</th><th>Daily TX</th><th>Deps</th><th>Enabled</th><th></th></tr></thead>
-            <tbody>
-              {loadingTasks && <SkeletonRows rows={3} cols={7} />}
-              {!loadingTasks && tasks.map(t => (
-                <React.Fragment key={t.id}>
-                  <tr>
-                    <td className="mono" style={{ color: 'var(--text-dim)' }}>{t.id}</td>
-                    <td>{t.task_type}</td>
-                    <td className="mono">{t.min_amount} – {t.max_amount}</td>
-                    <td className="mono">{t.daily_tx_min}–{t.daily_tx_max}</td>
-                    <td className="mono">{(t.dependency_task_ids || []).join(', ') || '—'}</td>
-                    <td><button className="ghost sm" onClick={() => toggle(t)}><Badge status={t.enabled}>{t.enabled ? 'Enabled' : 'Disabled'}</Badge></button></td>
-                    <td><button className="sm" onClick={() => setOpen(open === t.id ? null : t.id)}>{open === t.id ? 'Close' : 'Edit'}</button></td>
-                  </tr>
-                  {open === t.id && <tr style={{ background: 'var(--bg)' }}><td colSpan={7}><TaskEditor t={t} wallets={wallets} onSaved={() => loadTasks(selectedProj)} /></td></tr>}
-                </React.Fragment>
-              ))}
-            </tbody>
-          </table></div>
-          {!loadingTasks && tasks.length === 0 && <EmptyState icon="☐" title="No tasks configured" hint="This project has no task configurations yet." />}
+          <DataTable
+            columns={columns} rows={tasks} loading={loadingTasks} skeletonRows={3}
+            expanded={open}
+            renderExpanded={t => <TaskEditor t={t} wallets={wallets} onSaved={() => loadTasks(selectedProj)} />}
+            empty={<EmptyState icon="☐" title="No tasks configured" hint="This project has no task configurations yet." />}
+          />
         </Card>
       )}
     </div>

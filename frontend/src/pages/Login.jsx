@@ -14,7 +14,7 @@ export default function Login({ onLogin }) {
   const attemptLogin = async (payload) => {
     const res = await api.post('/auth/login', payload)
     localStorage.setItem('token', res.data.access_token)
-      onLogin(res.data.access_token)
+    onLogin(res.data.access_token)
   }
 
   const handleSubmit = async (e) => {
@@ -47,15 +47,10 @@ export default function Login({ onLogin }) {
 
   return (
     <div
+      className="login-wrap"
       style={{
-        minHeight: '100vh',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: 'var(--bg)',
         backgroundImage:
           'radial-gradient(circle at 20% 20%, rgba(94,234,212,0.08), transparent 45%), radial-gradient(circle at 80% 80%, rgba(167,139,250,0.07), transparent 45%)',
-        padding: 20,
       }}
     >
       <div className="fade-in" style={{ width: '100%', maxWidth: 400 }}>
@@ -111,9 +106,11 @@ export default function Login({ onLogin }) {
               <span style={{ fontSize: 12, color: 'var(--text-dim)', fontWeight: 600 }}>Authenticator code</span>
               <input
                 value={totpCode}
-                onChange={e => setTotpCode(e.target.value)}
+                onChange={e => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
                 placeholder="123456"
                 inputMode="numeric"
+                autoComplete="one-time-code"
+                pattern="[0-9]*"
                 maxLength={6}
                 autoFocus
                 required

@@ -1,59 +1,74 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { API_BASE } from '../api'
+import React, { useMemo } from 'react'
+import { Link } from 'react-router-dom'
+import api from '../api'
+import useApi from '../hooks/useApi'
+import { Card, PageHeader, StatTile, EmptyState, SkeletonBlock, Badge, Meter } from '../components/ui'
 
-export default function Snapshot({ token }) {
-  const [projects, setProjects] = useState([])
-  const h = { Authorization: `Bearer ${token}` }
+const DAY = 86400000
+const toneFor = d => (d <= 0 ? 'var(--text-faint)' : d <= 7 ? 'var(--rose)' : d <= 30 ? 'var(--amber)' : 'var(--signal)')
 
-  const load = useCallback(async () => {
-    try {
-      const d = await fetch(`${API_BASE}/projects/`, { headers: h }).then(r => r.json())
-      const today = new Date()
-      const withDays = (Array.isArray(d) ? d : [])
-        .filter(p => p.airdrop_date || p.tge_date)
-        .map(p => {
-          const date = p.airdrop_date || p.tge_date
-          const days = Math.ceil((new Date(date) - today) / 86400000)
-          return { ...p, deadline: date, days }
-        })
-        .sort((a, b) => a.days - b.days)
-      setProjects(withDays)
-    } catch {}
-  }, [token])
+export default function Snapshot() {
+  const { data, loading, error, reload, refreshing } = useApi(() => api.get('/projects/').then(r => r.data), [])
 
-  useEffect(() => { load() }, [load])
+  const rows = useMemo(() => {
+    const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0)
+    return (Array.isArray(data) ? data : [])
+      .filter(p => p.airdrop_date || p.tge_date)
+      .map(p => {
+        const date = p.airdrop_date || p.tge_date
+        // dates are plain YYYY-MM-DD: compare as local calendar days, not UTC instants
+        const [y, m, d] = String(date).slice(0, 10).split('-').map(Number)
+        const days = Math.round((new Date(y, m - 1, d) - startOfToday) / DAY)
+        return { ...p, date, kind: p.airdrop_date ? 'Snapshot / airdrop' : 'TGE', days }
+      })
+      .sort((a, b) => (a.days <= 0) - (b.days <= 0) || a.days - b.days)
+  }, [data])
 
-  const flag = d => d <= 0 ? '💥' : d <= 7 ? '🔴' : d <= 30 ? '🟡' : '🟢'
-  const bar  = d => Math.max(0, Math.min(100, 100 - (d / 90) * 100))
-  const card = { background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 10, padding: '16px 20px', marginBottom: 10 }
+  const upcoming = rows.filter(r => r.days > 0)
+  const soon = upcoming.filter(r => r.days <= 7).length
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>Snapshot Calendar</h2>
-        <button onClick={load} style={{ padding: '7px 16px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer' }}>Refresh</button>
+    <div className="stack">
+      <PageHeader
+        title="Snapshot calendar"
+        subtitle="Deadlines come from each project's airdrop or TGE date. Set them on the project page."
+        actions={<button onClick={reload} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>}
+      />
+      {error && <div className="error">{error}</div>}
+
+      <div className="grid-stats">
+        <Card><StatTile label="With a date" value={loading ? '…' : rows.length} /></Card>
+        <Card><StatTile label="Upcoming" value={loading ? '…' : upcoming.length} tone="violet" /></Card>
+        <Card><StatTile label="Within 7 days" value={loading ? '…' : soon} tone={soon ? 'rose' : 'default'} /></Card>
       </div>
 
-      {projects.length === 0
-        ? <div style={{ ...card, color: 'var(--text-secondary)', fontSize: 13 }}>No snapshot deadlines configured. Set airdrop_date or tge_date on your projects.</div>
-        : projects.map(p => (
-          <div key={p.id} style={card}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-              <div>
-                <span style={{ fontWeight: 600, fontSize: 14 }}>{flag(p.days)} {p.name}</span>
-                <span style={{ marginLeft: 10, fontSize: 12, color: 'var(--text-secondary)' }}>{p.deadline}</span>
+      {loading ? <SkeletonBlock height={120} /> : rows.length === 0 ? (
+        <Card><EmptyState icon="▦" title="No deadlines set" hint="Add an airdrop or TGE date on a project and it will show up here." action={<Link to="/projects">Go to projects →</Link>} /></Card>
+      ) : (
+        <div className="stack-sm">
+          {rows.map(p => (
+            <Card key={p.id} tight style={{ opacity: p.days <= 0 ? 0.6 : 1 }}>
+              <div className="row-between" style={{ marginBottom: 10 }}>
+                <div style={{ minWidth: 0 }}>
+                  <Link to={`/projects/${p.id}`} style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</Link>
+                  <div className="faint" style={{ fontSize: 12 }}>{p.kind} · {p.date}</div>
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div className="mono" style={{ fontWeight: 700, fontSize: 16, color: toneFor(p.days) }}>
+                    {p.days <= 0 ? 'Passed' : p.days === 1 ? 'Tomorrow' : `${p.days}d`}
+                  </div>
+                  {p.days > 0 && <div className="faint" style={{ fontSize: 11 }}>left</div>}
+                </div>
               </div>
-              <span style={{ fontWeight: 700, fontSize: 14, color: p.days <= 7 ? '#ef4444' : p.days <= 30 ? '#f59e0b' : 'var(--signal)' }}>
-                {p.days <= 0 ? 'PASSED' : `${p.days}d left`}
-              </span>
-            </div>
-            <div style={{ height: 6, background: 'var(--bg)', borderRadius: 99, overflow: 'hidden' }}>
-              <div style={{ height: '100%', width: `${bar(p.days)}%`, background: p.days <= 7 ? '#ef4444' : p.days <= 30 ? '#f59e0b' : 'var(--signal)', borderRadius: 99, transition: 'width .4s' }} />
-            </div>
-            <div style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 6 }}>Priority: {p.priority} · Status: {p.status}</div>
-          </div>
-        ))
-      }
+              <Meter percent={p.days <= 0 ? 100 : 100 - Math.min(p.days, 90) / 90 * 100} tone={toneFor(p.days)} />
+              <div className="row" style={{ marginTop: 10, gap: 8 }}>
+                <Badge status={p.status}>{p.status}</Badge>
+                <span className="chip">priority {p.priority}</span>
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

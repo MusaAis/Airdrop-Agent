@@ -2,12 +2,14 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import api from '../api'
 import { Card, Badge, EmptyState } from '../components/ui'
+import { useConfirm } from '../components/Confirm'
 
 const err = e => e?.response?.data?.detail || 'Request failed.'
 const CRIT_TYPES = ['tx_count', 'volume', 'time', 'social', 'token_hold', 'governance', 'other']
 const EMPTY_C = { type: 'tx_count', description: '', threshold: '', unit: '', uncertain: false }
 
 export default function ProjectDetail() {
+  const confirm = useConfirm()
   const { id } = useParams()
   const [p, setP] = useState(null)
   const [f, setF] = useState(null)
@@ -116,7 +118,7 @@ export default function ProjectDetail() {
                   <td style={{ fontSize: 12, color: 'var(--text-faint)' }}>{c.ai_extracted ? 'AI draft' : 'manual'}</td>
                   <td style={{ whiteSpace: 'nowrap' }}>
                     <button className="ghost sm" onClick={() => setEdit({ id: c.id, type: c.type, description: c.description, threshold: c.threshold, unit: c.unit, uncertain: c.uncertain })}>Edit</button>{' '}
-                    <button className="sm danger" onClick={() => window.confirm('Delete this criterion?') && act(() => api.delete(`/ops/criteria/${c.id}`))}>Delete</button>
+                    <button className="sm danger" onClick={async () => (await confirm({ title: 'Delete this criterion?', confirmLabel: 'Delete', tone: 'danger' })) && act(() => api.delete(`/ops/criteria/${c.id}`))}>Delete</button>
                   </td>
                 </tr>
               ))}

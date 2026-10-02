@@ -1,100 +1,94 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import { API_BASE } from '../api'
+import React, { useState } from 'react'
+import api from '../api'
+import useApi, { apiError } from '../hooks/useApi'
+import { useToast } from '../components/Toast'
+import { Card, PageHeader, Badge, Segmented, EmptyState, SkeletonBlock } from '../components/ui'
+import { fmtDateTime } from '../lib/format'
 
-const SEV_COLOR = { critical: '#ef4444', warning: '#f59e0b', info: 'var(--signal)' }
-const SEV_ICON  = { critical: '🔴', warning: '🟡', info: '🟢' }
+const SEV_TONE = { critical: 'danger', warning: 'warning', info: 'success' }
+const SEV_COLOR = { critical: 'var(--rose)', warning: 'var(--amber)', info: 'var(--signal)' }
 
-export default function Notifications({ token }) {
-  const [alerts, setAlerts]  = useState([])
-  const [filter, setFilter]  = useState('all')
-  const [snoozeUntil, setSnoozeUntil] = useState(null)
-  const h = { Authorization: `Bearer ${token}` }
+export default function Notifications() {
+  const toast = useToast()
+  const [filter, setFilter] = useState('unresolved')
+  const [busy, setBusy] = useState(false)
 
-  const load = useCallback(async () => {
-    try {
-      const d = await fetch(`${API_BASE}/agent/alerts-list`, { headers: h }).then(r => r.json())
-      setAlerts(Array.isArray(d) ? d : [])
-    } catch {}
-    try {
-      const s = await fetch(`${API_BASE}/agent/alerts/snooze`, { headers: h }).then(r => r.json())
-      setSnoozeUntil(s.snoozed ? s.until : null)
-    } catch {}
-  }, [token])
+  const alerts = useApi(() => api.get('/agent/alerts-list').then(r => r.data), [], { interval: 30000 })
+  const snooze = useApi(() => api.get('/agent/alerts/snooze').then(r => r.data), [], { interval: 30000 })
 
-  useEffect(() => { load(); const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
+  const list = Array.isArray(alerts.data) ? alerts.data : []
+  const snoozedUntil = snooze.data?.snoozed ? snooze.data.until : null
+  const unresolved = list.filter(a => !a.resolved).length
 
-  const resolve = async (id) => {
-    await fetch(`${API_BASE}/agent/alerts/${id}/resolve`, { method: 'POST', headers: h }); load()
-  }
-  const resolveAll = async () => {
-    await fetch(`${API_BASE}/agent/alerts/resolve-all`, { method: 'POST', headers: h }); load()
-  }
-  const snooze = async (minutes) => {
-    await fetch(`${API_BASE}/agent/alerts/snooze?minutes=${minutes}`, { method: 'POST', headers: h }); load()
-  }
-  const unsnooze = async () => {
-    await fetch(`${API_BASE}/agent/alerts/snooze`, { method: 'DELETE', headers: h }); load()
+  const run = async (fn, ok) => {
+    setBusy(true)
+    try { await fn(); if (ok) toast.success(ok); await Promise.all([alerts.reload(), snooze.reload()]) }
+    catch (e) { toast.error(apiError(e)) }
+    finally { setBusy(false) }
   }
 
-  const visible = alerts.filter(a => filter === 'all' || a.severity === filter || (filter === 'unresolved' && !a.resolved))
-  const unresolved = alerts.filter(a => !a.resolved).length
-
-  const card = { background: 'var(--bg-elevated)', border: '1px solid var(--border)', borderRadius: 10, padding: '13px 16px', marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }
-  const btn = { padding: '7px 14px', borderRadius: 8, background: 'var(--bg-elevated)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: 13 }
+  const visible = list.filter(a =>
+    filter === 'all' ? true : filter === 'unresolved' ? !a.resolved : a.severity === filter)
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, flexWrap: 'wrap', gap: 10 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>Notifications</h2>
-          {unresolved > 0 && <span style={{ background: '#ef4444', color: '#fff', borderRadius: 99, padding: '2px 9px', fontSize: 12, fontWeight: 700 }}>{unresolved}</span>}
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button onClick={load} style={btn}>Refresh</button>
-          {unresolved > 0 && <button onClick={resolveAll} style={{ ...btn, background: 'var(--signal)', border: 'none', color: '#06151A', fontWeight: 600 }}>Resolve All</button>}
-        </div>
-      </div>
+    <div className="stack">
+      <PageHeader
+        title="Alerts"
+        subtitle="Everything the agent flags is recorded here, even when Telegram is snoozed."
+        actions={
+          <>
+            <button onClick={() => { alerts.reload(); snooze.reload() }} disabled={alerts.refreshing}>Refresh</button>
+            {unresolved > 0 && <button className="primary" disabled={busy} onClick={() => run(() => api.post('/agent/alerts/resolve-all'), 'All alerts resolved.')}>Resolve all ({unresolved})</button>}
+          </>
+        }
+      />
 
-      {/* Telegram snooze — critical alerts are always sent */}
-      <div style={{ ...card, alignItems: 'center', flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 13 }}>
-          {snoozeUntil
-            ? <>🔕 Telegram alerts snoozed until <strong>{new Date(snoozeUntil).toLocaleTimeString()}</strong> <span style={{ color: 'var(--text-secondary)' }}>(critical alerts still sent; everything is still recorded here)</span></>
-            : <>🔔 Telegram alerts active</>}
-        </div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          {snoozeUntil
-            ? <button onClick={unsnooze} style={btn}>Resume now</button>
-            : [30, 120, 480].map(m => <button key={m} onClick={() => snooze(m)} style={btn}>Snooze {m >= 60 ? `${m / 60}h` : `${m}m`}</button>)}
-        </div>
-      </div>
-
-      {/* Filter tabs */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        {['all','unresolved','critical','warning','info'].map(f => (
-          <button key={f} onClick={() => setFilter(f)} style={{ padding: '6px 14px', borderRadius: 7, border: '1px solid var(--border)', background: filter === f ? 'var(--signal)' : 'var(--bg-elevated)', color: filter === f ? '#06151A' : 'var(--text)', fontWeight: filter === f ? 600 : 400, cursor: 'pointer', fontSize: 13, textTransform: 'capitalize' }}>{f}</button>
-        ))}
-      </div>
-
-      {visible.length === 0
-        ? <div style={{ ...card, justifyContent: 'center', color: 'var(--text-secondary)', fontSize: 13 }}>No alerts to show.</div>
-        : visible.map(a => (
-          <div key={a.id} style={{ ...card, opacity: a.resolved ? 0.55 : 1, borderLeft: `3px solid ${SEV_COLOR[a.severity] || 'var(--border)'}` }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <span>{SEV_ICON[a.severity] || '⚪'}</span>
-                <span style={{ fontWeight: 600, fontSize: 13 }}>{a.type?.replace(/_/g,' ')}</span>
-                {a.resolved && <span style={{ fontSize: 11, color: 'var(--text-secondary)' }}>resolved</span>}
-              </div>
-              <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4, whiteSpace: 'pre-wrap' }}>{a.message}</div>
-              <div style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{new Date(a.created_at).toLocaleString()}</div>
-            </div>
-            {!a.resolved && (
-              <button onClick={() => resolve(a.id)} style={{ padding: '5px 12px', borderRadius: 6, background: 'var(--bg)', border: '1px solid var(--border)', color: 'var(--text)', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' }}>Resolve</button>
-            )}
+      <Card tight>
+        <div className="row-between">
+          <div style={{ fontSize: 13 }}>
+            {snoozedUntil
+              ? <>🔕 Telegram snoozed until <strong>{fmtDateTime(snoozedUntil)}</strong> <span className="faint">· critical alerts still go out</span></>
+              : <>🔔 Telegram alerts are on</>}
           </div>
-        ))
-      }
+          <div className="row">
+            {snoozedUntil
+              ? <button className="sm" disabled={busy} onClick={() => run(() => api.delete('/agent/alerts/snooze'), 'Alerts resumed.')}>Resume now</button>
+              : [30, 120, 480].map(m => (
+                <button key={m} className="sm" disabled={busy} onClick={() => run(() => api.post('/agent/alerts/snooze', null, { params: { minutes: m } }), `Snoozed for ${m >= 60 ? `${m / 60}h` : `${m}m`}.`)}>
+                  Snooze {m >= 60 ? `${m / 60}h` : `${m}m`}
+                </button>
+              ))}
+          </div>
+        </div>
+      </Card>
+
+      <Segmented value={filter} onChange={setFilter} options={['unresolved', 'all', 'critical', 'warning', 'info']} />
+
+      {alerts.error && <div className="error">{alerts.error}</div>}
+
+      {alerts.loading ? <SkeletonBlock height={100} /> : visible.length === 0 ? (
+        <Card><EmptyState icon="✓" title={filter === 'unresolved' ? 'All clear' : 'Nothing here'} hint={filter === 'unresolved' ? 'No unresolved alerts.' : 'No alerts match this filter.'} /></Card>
+      ) : (
+        <div className="stack-sm">
+          {visible.map(a => (
+            <div key={a.id} className="card tight" style={{ opacity: a.resolved ? 0.55 : 1, borderLeft: `3px solid ${SEV_COLOR[a.severity] || 'var(--border)'}` }}>
+              <div className="row-between" style={{ alignItems: 'flex-start', flexWrap: 'nowrap' }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="row" style={{ gap: 8, marginBottom: 6 }}>
+                    <Badge tone={SEV_TONE[a.severity] || 'neutral'}>{a.severity}</Badge>
+                    <span style={{ fontWeight: 600, fontSize: 13 }}>{a.type?.replace(/_/g, ' ')}</span>
+                    {a.resolved && <span className="faint" style={{ fontSize: 11 }}>resolved</span>}
+                  </div>
+                  <div className="muted" style={{ fontSize: 13, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{a.message}</div>
+                  <div className="faint" style={{ fontSize: 11, marginTop: 6 }}>{fmtDateTime(a.created_at)}</div>
+                </div>
+                {!a.resolved && <button className="sm" disabled={busy} onClick={() => run(() => api.post(`/agent/alerts/${a.id}/resolve`))}>Resolve</button>}
+              </div>
+            </div>
+          ))}
+          {list.length >= 50 && <p className="hint" style={{ textAlign: 'center' }}>Showing the latest 50 alerts.</p>}
+        </div>
+      )}
     </div>
   )
 }

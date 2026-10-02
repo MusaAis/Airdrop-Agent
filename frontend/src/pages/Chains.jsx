@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
 import { Card, Badge, EmptyState } from '../components/ui'
+import { useConfirm } from '../components/Confirm'
 
 const EMPTY = { name: '', chain_id: '', rpc_urls: '', gas_token_symbol: 'ETH', gas_token_is_native: true }
 const EMPTY_TOKEN = { symbol: '', contract_address: '', decimals: 18, coingecko_id: '' }
@@ -104,6 +105,7 @@ function ChainPanel({ c, onSaved }) {
 }
 
 export default function Chains() {
+  const confirm = useConfirm()
   const [chains, setChains] = useState([])
   const [loaded, setLoaded] = useState(false)
   const [newChain, setNewChain] = useState(EMPTY)
@@ -122,7 +124,7 @@ export default function Chains() {
     } catch (e) { setMsg(err(e)) }
   }
   const remove = async (c) => {
-    if (!window.confirm(`Delete chain "${c.name}"? Tasks, tokens and faucets that point at it will break.`)) return
+    if (!(await confirm({ title: `Delete chain “${c.name}”?`, message: 'Tasks, tokens and faucets that point at it will break.', confirmLabel: 'Delete chain', tone: 'danger' }))) return
     try { await api.delete(`/chains/${c.id}`); setOpen(null); fetchChains() } catch (e) { setMsg(err(e)) }
   }
 

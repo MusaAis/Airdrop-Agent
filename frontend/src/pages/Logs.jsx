@@ -1,64 +1,62 @@
-import React, { useEffect, useState } from 'react'
+import React, { useState } from 'react'
 import api from '../api'
-import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
+import useApi from '../hooks/useApi'
+import useLiveFeed from '../hooks/useLiveFeed'
+import LiveLog from '../components/LiveLog'
+import { Card, Badge, PageHeader, EmptyState, DataTable, Segmented } from '../components/ui'
+import { fmtDateTime, shortAddr } from '../lib/format'
 
 export default function Logs() {
-  const [logs, setLogs] = useState([])
+  const [tab, setTab] = useState('transactions')
   const [filter, setFilter] = useState('')
-  const [loaded, setLoaded] = useState(false)
-  const [connected, setConnected] = useState(false)
+  const { data, loading, error, reload, refreshing } = useApi(() => api.get('/reports/activity?hours=24').then(r => r.data), [], { interval: 60000 })
+  const { connected, events } = useLiveFeed()
 
-  useEffect(() => {
-    api.get('/reports/activity?hours=24').then(r => { setLogs(Array.isArray(r.data) ? r.data : []); setLoaded(true) }).catch(() => setLoaded(true))
-    const backendWs = import.meta.env.VITE_BACKEND_WS_URL || `ws://${window.location.hostname}:8000`
-    const ws = new WebSocket(`${backendWs}/ws/logs?token=${localStorage.getItem('token') || ''}`)
-    ws.onopen = () => setConnected(true)
-    ws.onclose = () => setConnected(false)
-    ws.onmessage = (e) => {
-      setLogs(prev => [JSON.parse(e.data), ...prev.slice(0, 199)])
-    }
-    return () => ws.close()
-  }, [])
+  const rows = (Array.isArray(data) ? data : []).filter(l => !filter || JSON.stringify(l).toLowerCase().includes(filter.toLowerCase()))
 
-  const filtered = (Array.isArray(logs) ? logs : []).filter(l => JSON.stringify(l).toLowerCase().includes(filter.toLowerCase()))
+  const columns = [
+    { key: 'created_at', label: 'Time', render: l => <span className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(l.created_at)}</span> },
+    { key: 'wallet', label: 'Wallet', render: l => <span className="mono">{shortAddr(l.wallet)}</span> },
+    { key: 'project', label: 'Project' },
+    { key: 'task_type', label: 'Task' },
+    { key: 'chain', label: 'Chain' },
+    { key: 'status', label: 'Status', render: l => <Badge status={l.status}>{l.status}</Badge> },
+    { key: 'gas', label: 'Gas $', num: true, render: l => <span className="mono">${l.gas_cost_usd ?? 0}</span> },
+  ]
 
   return (
-    <Card
-      title="Activity log · last 24h"
-      action={
-        <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: connected ? 'var(--signal)' : 'var(--text-faint)' }}>
-          <span className="pulse-dot" style={{ background: connected ? 'var(--signal)' : 'var(--text-faint)', animation: connected ? undefined : 'none' }} />
-          {connected ? 'Live' : 'Offline'}
-        </span>
-      }
-    >
-      <input
-        placeholder="Filter by wallet, project, task, status…"
-        value={filter}
-        onChange={e => setFilter(e.target.value)}
-        style={{ width: '100%', marginBottom: 14 }}
+    <div className="stack">
+      <PageHeader
+        title="Activity"
+        subtitle="Transactions from the last 24 hours, and the live event stream."
+        actions={<Segmented value={tab} onChange={setTab} options={[{ value: 'transactions', label: 'Transactions' }, { value: 'live', label: 'Live events' }]} />}
       />
-      <div className="table-scroll"><table>
-        <thead>
-          <tr><th>Time</th><th>Wallet</th><th>Project</th><th>Task</th><th>Status</th><th style={{ textAlign: 'right' }}>Gas $</th></tr>
-        </thead>
-        <tbody>
-          {!loaded && <SkeletonRows rows={6} cols={6} />}
-          {loaded && filtered.map((l, i) => (
-            <tr key={i}>
-              <td className="mono" style={{ color: 'var(--text-dim)', fontSize: 12 }}>{l.created_at}</td>
-              <td className="mono">{l.wallet}</td>
-              <td>{l.project}</td>
-              <td>{l.task_type}</td>
-              <td><Badge status={l.status}>{l.status}</Badge></td>
-              <td className="mono" style={{ textAlign: 'right' }}>${l.gas_cost_usd}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table></div>
-      {loaded && filtered.length === 0 && (
-        <EmptyState icon="≡" title={filter ? 'No matching entries' : 'No activity yet'} hint={filter ? 'Try a different filter term.' : 'Activity will appear here as tasks execute.'} />
+
+      {tab === 'transactions' ? (
+        <Card
+          title="Last 24 hours"
+          action={<button className="sm" onClick={reload} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>}
+        >
+          <input placeholder="Filter by wallet, project, task, status…" value={filter} onChange={e => setFilter(e.target.value)} style={{ width: '100%', marginBottom: 14 }} />
+          {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
+          <DataTable
+            columns={columns} rows={rows} loading={loading} skeletonRows={6}
+            empty={<EmptyState icon="≡" title={filter ? 'No matching entries' : 'No activity yet'} hint={filter ? 'Try a different filter term.' : 'Activity appears here as tasks execute.'} />}
+          />
+        </Card>
+      ) : (
+        <Card
+          title="Live events"
+          action={
+            <span className="row" style={{ gap: 6, fontSize: 12, color: connected ? 'var(--signal)' : 'var(--text-faint)' }}>
+              <span className="pulse-dot" style={{ background: connected ? 'var(--signal)' : 'var(--text-faint)', animation: connected ? undefined : 'none' }} />
+              {connected ? 'Live' : 'Offline'}
+            </span>
+          }
+        >
+          <LiveLog events={events} maxHeight={560} />
+        </Card>
       )}
-    </Card>
+    </div>
   )
 }

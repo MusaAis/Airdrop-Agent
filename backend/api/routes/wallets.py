@@ -50,6 +50,8 @@ class WalletResponse(BaseModel):
     tags: Optional[list] = None
     persona: Optional[dict] = None
     failure_count: int = 0
+    health_score: int = 100
+    sybil_risk_score: int = 0
 
     model_config = {"from_attributes": True}
 

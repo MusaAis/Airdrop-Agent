@@ -1,8 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
-import { Card, Badge } from './ui'
+import { apiError } from '../hooks/useApi'
+import { useToast } from './Toast'
+import { useConfirm } from './Confirm'
+import { Modal, Badge, Field } from './ui'
 
-const err = e => e?.response?.data?.detail || 'Request failed.'
 const num = v => (v === '' || v == null ? null : Number(v))
 
 const NUM_FIELDS = [
@@ -13,30 +15,33 @@ const NUM_FIELDS = [
   ['daily_tx_min', 'Daily tx min'], ['daily_tx_max', 'Daily tx max'],
 ]
 
+/** Wallet manager — opens as a modal (a bottom sheet on phones). */
 export default function WalletManage({ wallet, onChanged, onClose }) {
+  const toast = useToast()
+  const confirm = useConfirm()
   const id = wallet?.id
   const [tags, setTags] = useState('')
   const [s, setS] = useState(null)
   const [nonces, setNonces] = useState([])
   const [chains, setChains] = useState([])
-  const [msg, setMsg] = useState('')
 
   const loadNonces = () => api.get(`/ops/wallets/${id}/nonces`).then(r => setNonces(r.data)).catch(() => {})
 
   useEffect(() => {
     if (!id) return
-    setMsg(''); setTags((wallet.tags || []).join(', ')); setS(null)
+    setTags((wallet.tags || []).join(', ')); setS(null)
     api.get(`/wallets/${id}/settings`).then(r => setS(r.data)).catch(() => setS({}))
     api.get('/chains/').then(r => setChains(r.data)).catch(() => {})
     loadNonces()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
   if (!wallet) return null
   const chainName = cid => chains.find(c => c.id === cid)?.name || `chain #${cid}`
 
   const act = async (fn, ok) => {
-    setMsg('')
-    try { const r = await fn(); setMsg(ok || r?.data?.message || 'Done.'); onChanged?.() } catch (e) { setMsg(err(e)) }
+    try { const r = await fn(); toast.success(ok || r?.data?.message || 'Done.'); onChanged?.() }
+    catch (e) { toast.error(apiError(e)) }
   }
 
   const saveSettings = () => act(() => api.put(`/wallets/${id}/settings`, {
@@ -46,49 +51,52 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
     bidirectional_default: !!s.bidirectional_default,
   }), 'Settings saved.')
 
+  const blacklist = async () => {
+    if (await confirm({ title: `Blacklist wallet #${id}?`, message: 'The agent will never use it again until you change its status.', confirmLabel: 'Blacklist', tone: 'danger' }))
+      act(() => api.put(`/wallets/${id}/status`, null, { params: { status: 'blacklisted' } }), 'Blacklisted.')
+  }
+
   return (
-    <Card title={`Manage wallet #${id}`} action={<button className="ghost sm" onClick={onClose}>Close</button>}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+    <Modal title={`Manage wallet #${id}`} onClose={onClose} width={720}>
+      <div className="stack" style={{ gap: 18, marginTop: 10 }}>
+        <div className="row">
           <Badge status={wallet.status}>{wallet.status}</Badge>
-          <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>failures: {wallet.failure_count ?? 0}</span>
+          <span className="muted" style={{ fontSize: 12 }}>failures: {wallet.failure_count ?? 0}</span>
           {['cooldown', 'paused'].includes(wallet.status) && (
             <button className="primary sm" onClick={() => act(() => api.post(`/ops/wallets/${id}/recover`))}>Recover (active + reset failures)</button>
           )}
-          {wallet.status !== 'blacklisted' && (
-            <button className="sm danger" onClick={() => window.confirm('Blacklist this wallet?') && act(() => api.put(`/wallets/${id}/status`, null, { params: { status: 'blacklisted' } }), 'Blacklisted.')}>Blacklist</button>
-          )}
+          {wallet.status !== 'blacklisted' && <button className="sm danger" onClick={blacklist}>Blacklist</button>}
           <button className="sm" onClick={() => act(() => api.put(`/wallets/${id}/gas-wallet`, null, { params: { is_gas: !wallet.is_gas_wallet } }), wallet.is_gas_wallet ? 'No longer a gas wallet.' : 'Marked as gas wallet.')}>
             {wallet.is_gas_wallet ? 'Unset gas wallet' : 'Set as gas wallet'}
           </button>
         </div>
 
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <input placeholder="tags, comma separated" value={tags} onChange={e => setTags(e.target.value)} style={{ flex: 1, minWidth: 220 }} />
+        <div className="row" style={{ flexWrap: 'nowrap' }}>
+          <input className="grow" placeholder="tags, comma separated" value={tags} onChange={e => setTags(e.target.value)} />
           <button className="sm" onClick={() => act(() => api.put(`/ops/wallets/${id}/tags`, { tags: tags.split(',') }), 'Tags saved.')}>Save tags</button>
         </div>
 
         <div>
-          <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 8 }}>Persona / behaviour settings</div>
+          <div className="eyebrow" style={{ marginBottom: 8 }}>Persona / behaviour settings</div>
           {!s ? <div className="skeleton" style={{ height: 50 }} /> : (
             <>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(190px, 1fr))', gap: 10 }}>
+              <div className="grid-fields">
                 {NUM_FIELDS.map(([k, label]) => (
-                  <label key={k} style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-dim)' }}>
-                    {label}
-                    <input type="number" step="any" value={s[k] ?? ''} onChange={e => setS({ ...s, [k]: e.target.value })} style={{ width: '100%' }} />
-                  </label>
+                  <Field key={k} label={label}>
+                    <input type="number" inputMode="decimal" step="any" value={s[k] ?? ''} onChange={e => setS({ ...s, [k]: e.target.value })} />
+                  </Field>
                 ))}
-                <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12, color: 'var(--text-dim)' }}>
-                  Amount distribution
+                <Field label="Amount distribution">
                   <select value={s.amount_distribution || 'weighted_low'} onChange={e => setS({ ...s, amount_distribution: e.target.value })}>
-                    <option value="weighted_low">weighted low</option><option value="weighted_high">weighted high</option><option value="uniform">uniform</option>
+                    <option value="weighted_low">weighted low</option>
+                    <option value="weighted_high">weighted high</option>
+                    <option value="uniform">uniform</option>
                   </select>
-                </label>
+                </Field>
               </div>
-              <div style={{ display: 'flex', gap: 16, margin: '10px 0', fontSize: 13 }}>
-                <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!s.amount_vary_daily} onChange={e => setS({ ...s, amount_vary_daily: e.target.checked })} /> vary amounts daily</label>
-                <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}><input type="checkbox" style={{ width: 'auto' }} checked={!!s.bidirectional_default} onChange={e => setS({ ...s, bidirectional_default: e.target.checked })} /> bidirectional by default</label>
+              <div className="row" style={{ gap: 18, margin: '12px 0' }}>
+                <label className="check"><input type="checkbox" checked={!!s.amount_vary_daily} onChange={e => setS({ ...s, amount_vary_daily: e.target.checked })} /> vary amounts daily</label>
+                <label className="check"><input type="checkbox" checked={!!s.bidirectional_default} onChange={e => setS({ ...s, bidirectional_default: e.target.checked })} /> bidirectional by default</label>
               </div>
               <button className="primary sm" onClick={saveSettings}>Save settings</button>
             </>
@@ -96,10 +104,10 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
         </div>
 
         <div>
-          <div style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', marginBottom: 8 }}>Nonces</div>
-          {nonces.length === 0 ? <span style={{ fontSize: 12.5, color: 'var(--text-faint)' }}>No nonce records yet.</span> : nonces.map(n => (
-            <div key={n.chain_id} style={{ display: 'flex', gap: 10, alignItems: 'center', fontSize: 12.5, marginBottom: 6, flexWrap: 'wrap' }}>
-              <span style={{ minWidth: 120 }}>{chainName(n.chain_id)}</span>
+          <div className="eyebrow" style={{ marginBottom: 8 }}>Nonces</div>
+          {nonces.length === 0 ? <span className="faint" style={{ fontSize: 12.5 }}>No nonce records yet.</span> : nonces.map(n => (
+            <div key={n.chain_id} className="row" style={{ fontSize: 12.5, marginBottom: 8 }}>
+              <span style={{ minWidth: 110 }}>{chainName(n.chain_id)}</span>
               <span className="mono">nonce {n.nonce}</span>
               <Badge status={n.locked ? 'pending' : 'active'}>{n.locked ? 'locked' : 'free'}</Badge>
               {n.locked && <button className="sm" onClick={() => act(() => api.post(`/ops/wallets/${id}/nonces/${n.chain_id}/release`).then(r => { loadNonces(); return r }))}>Release lock</button>}
@@ -108,8 +116,8 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
           ))}
         </div>
 
-        {msg && <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{msg}</div>}
+        <div className="modal-actions" style={{ marginTop: 0 }}><button onClick={onClose}>Close</button></div>
       </div>
-    </Card>
+    </Modal>
   )
 }

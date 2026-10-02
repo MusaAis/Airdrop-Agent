@@ -1,27 +1,34 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const API = 'http://localhost:8002'
+
+// Several API prefixes (/wallets, /projects, /chains, /reports…) are also page routes.
+// Without this, reloading the browser on /wallets was proxied to the backend instead of
+// serving the app. Browser navigations (Accept: text/html) get index.html; fetch/XHR still proxy.
+const api = {
+  target: API,
+  bypass: req => (req.headers.accept?.includes('text/html') ? '/index.html' : undefined),
+}
+
 export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      '/auth': 'http://localhost:8002',
-      '/agent': 'http://localhost:8002',
-      '/chains': 'http://localhost:8002',
-      '/wallets': 'http://localhost:8002',
-      '/projects': 'http://localhost:8002',
-      '/faucets': 'http://localhost:8002',
-      '/ai': 'http://localhost:8002',
-      '/autonomy': 'http://localhost:8002',
-      '/reports': 'http://localhost:8002',
-      '/ops': 'http://localhost:8002',
-      '/stats': 'http://localhost:8002',
-      '/proxies': 'http://localhost:8002',
-      '/autonomy': 'http://localhost:8002',
-      '/ws': {
-        target: 'ws://localhost:8002',
-        ws: true
-      }
-    }
-  }
+      '/auth': api,
+      '/agent': api,
+      '/chains': api,
+      '/wallets': api,
+      '/projects': api,
+      '/faucets': api,
+      '/ai': api,
+      '/autonomy': api,
+      '/reports': api,
+      '/ops': api,
+      '/stats': api,
+      '/proxies': api,
+      '/claims': api,
+      '/ws': { target: 'ws://localhost:8002', ws: true },
+    },
+  },
 })

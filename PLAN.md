@@ -176,7 +176,25 @@ Phase 8 (Telegram group with topics: reports, errors, AI activity) is done.
 - `backend/telegram/sender.py` — replace
 - Patched in place by `apply_phase8_patches.py`: `backend/main.py`, `backend/core/scheduler.py`, `backend/telegram/alerts.py`, `backend/telegram/bot.py`, `backend/telegram/commands/help.py`
 
-## next up: phase 9
+## 0.9 Phase 9 completion notes
+Phase 9 (website redesign + polish, phone and desktop) is done.
+
+**Design system** (`frontend/src/index.css`, `components/ui.jsx`): one token set and shared pieces instead of per-page inline styles. `DataTable` is a normal table on desktop and stacked cards on phones, `Modal` is a bottom sheet on phones, `Toast` and `useConfirm()`/`ConfirmButton` replace every `window.confirm`, `useApi` handles loading/error/refresh/polling (pauses while the tab is hidden), `Field`, `Segmented`, `Meter`, `PageHeader`, `StatTile`.
+**Navigation:** one config (`components/nav.js`) drives the grouped desktop sidebar (Operate / Monitor / System, unresolved-alert badge) and a phone bottom bar (Dashboard, Wallets, Projects, Alerts + a More sheet). Safe-area insets, 16px inputs (no iOS zoom), 44px touch targets.
+**Pages rebuilt on the system:** Dashboard, Wallets (+ Manage as modal), Balances, Projects, Tasks, Proxies, Logs, AiLog, Claims, Sybil, Snapshot, Notifications. Chains, Faucets, ProjectDetail, AddProject, Reports, Settings only got toast/confirm swaps and inherit the new look; deeper rework is below.
+**Live feed:** `useLiveFeed` reconnects with backoff and reads the real event types (`log`, `heartbeat`, `status`); the Dashboard/Logs no longer print raw JSON. The WebSocket URL now follows the page origin (wss on https) unless `VITE_BACKEND_WS_URL` is set.
+**Sessions:** a reload no longer logs you out: the saved token is checked against `/agent/status` at start-up and dropped if expired. (The refresh-token flow is still not used, see below.)
+
+**Backend (small):** `GET /claims/scan` (new `api/routes/claims.py`, read-only, cached 10 min, `?refresh=true` to rescan) replaces the four dead `/claims/*` calls. `WalletResponse` now returns `health_score` and `sybil_risk_score`, so Sybil and Wallets show real numbers.
+**Fixes:** server timestamps are naive UTC and were shown shifted by the browser's offset (and unparseable on iOS when sent with a space); all pages now go through `lib/format.js`. The Vite dev proxy served the API instead of the app when you reloaded on /wallets, /projects etc.; fixed with an HTML bypass. Duplicate `/autonomy` proxy key removed, `/claims` added. Projects quick-add offered bridge/lending/dex which the wizard and prompts don't know; it now offers dapp/ecosystem only. Private key import field is a password input.
+
+**Migration:** none. **Not done on purpose:** claim execution (still manual outside the panel).
+
+**New/edited files in Phase 9**
+- `backend/api/routes/claims.py` new; `backend/main.py`, `backend/api/routes/wallets.py` small edits
+- `frontend/`: `src/index.css`, `App.jsx`, `vite.config.js`, `components/{ui,nav,Sidebar,BottomNav,Topbar,Toast,Confirm,LiveLog,WalletManage,StatsOverview,SystemPanel}`, `hooks/{useApi,useLiveFeed}.js`, `lib/format.js`, pages `{Dashboard,Wallets,Balances,Projects,Tasks,Proxies,Logs,AiLog,Claims,Sybil,Snapshot,Notifications,Login,Chains,Faucets,ProjectDetail}`
+
+## next up: phase 10 (documentation)
 
 ## Known, not built
 **every times you discovered somethings usefull and you didn't build/fix it, add it here and the dev team will lock at it and build it, don't forgot to add recommendations if there is any here too:**
@@ -185,7 +203,7 @@ Phase 8 (Telegram group with topics: reports, errors, AI activity) is done.
 - `project_priority` reduces only; it does not restore priority when the project recovers.
 - `SwapTask` uses `self.token_decimals` (18) for every input token, so token->token swaps of 6-decimal tokens (USDC/USDT) compute a wrong amount. Needs a decimals lookup before ERC20 swaps are trusted.
 **added in Phase 7, with recommendations**
-- **Claims page is dead**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box.
+- ~~Claims page is dead~~ (Phase 9: read-only `/claims/scan` built). Still open: manual claim execution with confirm + dry-run. **Claims page is dead (old note)**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box. **note** no need for automatic claims, leave it as read only, as its. just a small improvement if needed.
 - **Project blacklist is unenforced**: `CompletedProjectsBlacklist` was only read by the removed discovery code. Recommend: either check it in project creation (route + Telegram wizard) or drop the table and command.
 - **`DRY_RUN_MODE` env is ignored**: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
 - **Emergency stop is in memory too** and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
@@ -434,6 +452,7 @@ Ideas worth considering after the current phase, not committed to yet:
 - **Real-time AIs analysis & improvements & validation & reports/alerts and so on/etc**
 - **and a lots of featurs thats i for forgot to mentions & your allowed to suggest for new features thats you find is useful for this project, including now or for the future roadmap, thank you**
 - if you get some too while lookimg/viewing this project you are good/allowed to add some too, if there useful just add them and explain, thats all.
+
 ---
 
 ## 9. Execution phases (proposed grouping — for reference once building starts)
@@ -445,8 +464,16 @@ Ideas worth considering after the current phase, not committed to yet:
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6. *built*
 6. **Phase 6 — New feature: AI-managed tasks/wallets** *built*
 7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
-8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *not yet*
-9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *not yet*
+8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *built*
+9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *built*
 10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
 
 This grouping is a suggestion, not a commitment — order can change based on what MusaAis wants tackled first once execution begins.
+
+**added in Phase 9**
+- **Still to restyle properly:** Chains, Faucets, ProjectDetail, AddProject, Reports (raw JSON for most report types) and Settings work and match the theme but still use older inline layouts. Recommend: Reports as real tables/charts (recharts is already a dependency), Settings as the home for report schedule + proxy/limits.
+- **Claim scan estimates are rough:** `claims/manager.py` assumes 18 decimals and prices with the gas-token price. Recommend a token lookup (as `SwapTask._get_decimals` does) before anyone relies on the dollar figure.
+- **Refresh token still unused;** token stays in localStorage (as before). Recommend an httpOnly refresh cookie so the access token can live in memory only.
+- **No automated frontend tests;** layouts were checked by screenshot at 390px and 1280px against mocked data only. Do a pass on a real phone against the live API.
+- **More-tab icon** on the phone bar is a thin dots glyph; swap for a clearer icon.
+- **No auto claims** airdrop-agent didn't want thats feature for now, leave it as read-only.

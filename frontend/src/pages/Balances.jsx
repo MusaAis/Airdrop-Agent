@@ -1,17 +1,9 @@
-import React, { useEffect, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import api from '../api'
-import Spinner from '../components/Spinner'
-import { Card, Badge, EmptyState, SkeletonRows, StatTile } from '../components/ui'
-
-function truncate(addr) {
-  if (!addr || addr.length < 12) return addr
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
-}
-
-function fmtUsd(v) {
-  if (v === null || v === undefined) return '—'
-  return `$${v.toFixed(2)}`
-}
+import useApi, { apiError } from '../hooks/useApi'
+import { useToast } from '../components/Toast'
+import { Card, Badge, PageHeader, EmptyState, DataTable, StatTile, Segmented } from '../components/ui'
+import { shortAddr, fmtUsd, fmtDateTime } from '../lib/format'
 
 function fmtBalance(v) {
   if (v === null || v === undefined) return '—'
@@ -20,164 +12,95 @@ function fmtBalance(v) {
   return v.toFixed(v < 1 ? 6 : 4)
 }
 
-// NOTE: this page was not in the original master plan's frontend section —
-// added because there was no way to see which wallets actually have funds
-// without checking a chain explorer manually per wallet per chain. The
-// backend wallet_balances table already existed but nothing read or wrote
-// to it before this.
-export default function Balances({ token }) {
-  const [summaries, setSummaries] = useState([])
-  const [loading, setLoading] = useState(false)
-  const [initialLoad, setInitialLoad] = useState(true)
-  const [refreshingAll, setRefreshingAll] = useState(false)
-  const [refreshingWallet, setRefreshingWallet] = useState(null)
-  const [actionMessage, setActionMessage] = useState('')
-  const [filter, setFilter] = useState('all') // all / funded / empty
+const latest = s => s.balances.reduce((l, b) => (!l || (b.last_updated && b.last_updated > l) ? b.last_updated : l), null)
+
+export default function Balances() {
+  const toast = useToast()
+  const { data, loading, error, reload } = useApi(() => api.get('/wallets/balances/all').then(r => r.data), [])
+  const summaries = Array.isArray(data) ? data : []
+
+  const [filter, setFilter] = useState('all')
   const [expanded, setExpanded] = useState(null)
-
-  const fetchBalances = async () => {
-    setLoading(true)
-    try {
-      const r = await api.get('/wallets/balances/all')
-      setSummaries(r.data)
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setLoading(false)
-      setInitialLoad(false)
-    }
-  }
-
-  useEffect(() => { fetchBalances() }, [])
+  const [refreshingAll, setRefreshingAll] = useState(false)
+  const [refreshingId, setRefreshingId] = useState(null)
 
   const refreshAll = async () => {
-    setActionMessage('')
     setRefreshingAll(true)
     try {
-      const r = await api.post('/wallets/balances/refresh-all')
-      setActionMessage(r.data.message || 'Refreshed.')
-      await fetchBalances()
+      const r = await api.post('/wallets/balances/refresh-all', null, { timeout: 180000 })
+      toast.success(r.data.message || 'Balances refreshed.')
+      await reload()
     } catch (e) {
-      setActionMessage('Error refreshing balances — this can time out for large wallet sets, try refreshing individual wallets instead.')
-    } finally {
-      setRefreshingAll(false)
-    }
+      toast.error(apiError(e, 'Refresh failed — with many wallets this can time out; refresh single wallets instead.'))
+    } finally { setRefreshingAll(false) }
+  }
+  const refreshOne = async id => {
+    setRefreshingId(id)
+    try { await api.post(`/wallets/${id}/balances/refresh`); await reload() }
+    catch (e) { toast.error(apiError(e, `Could not refresh wallet ${id}.`)) }
+    finally { setRefreshingId(null) }
   }
 
-  const refreshOne = async (walletId) => {
-    setRefreshingWallet(walletId)
-    try {
-      await api.post(`/wallets/${walletId}/balances/refresh`)
-      await fetchBalances()
-    } catch (e) {
-      setActionMessage(`Error refreshing wallet ${walletId}`)
-    } finally {
-      setRefreshingWallet(null)
+  const totals = useMemo(() => {
+    const funded = summaries.filter(s => (s.total_usd || 0) > 0).length
+    return {
+      usd: summaries.reduce((sum, s) => sum + (s.total_usd || 0), 0),
+      funded, empty: summaries.length - funded, gas: summaries.filter(s => s.is_gas_wallet).length,
     }
-  }
+  }, [summaries])
 
-  const totalUsd = summaries.reduce((sum, s) => sum + (s.total_usd || 0), 0)
-  const fundedCount = summaries.filter(s => (s.total_usd || 0) > 0).length
-  const emptyCount = summaries.length - fundedCount
-  const gasWalletCount = summaries.filter(s => s.is_gas_wallet).length
+  const visible = summaries.filter(s =>
+    filter === 'funded' ? (s.total_usd || 0) > 0 : filter === 'empty' ? (s.total_usd || 0) === 0 : true)
 
-  const visible = summaries.filter(s => {
-    if (filter === 'funded') return (s.total_usd || 0) > 0
-    if (filter === 'empty') return (s.total_usd || 0) === 0
-    return true
-  })
+  const columns = [
+    {
+      key: 'wallet', label: 'Wallet',
+      render: s => (<span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}><span className="mono">{shortAddr(s.address)}</span>{s.is_gas_wallet && <Badge tone="warning">gas</Badge>}</span>),
+    },
+    { key: 'status', label: 'Status', render: s => <Badge status={s.status}>{s.status}</Badge> },
+    { key: 'usd', label: 'Total USD', num: true, render: s => <span className="mono" style={{ fontWeight: 600, color: (s.total_usd || 0) > 0 ? 'var(--signal)' : 'var(--text-faint)' }}>{fmtUsd(s.total_usd)}</span> },
+    { key: 'tokens', label: 'Tokens', render: s => <span className="muted" style={{ fontSize: 12 }}>{s.balances.length ? `${s.balances.length} token(s) ${expanded === s.wallet_id ? '▲' : '▼'}` : 'no data yet'}</span> },
+    { key: 'updated', label: 'Updated', render: s => <span className="faint" style={{ fontSize: 12 }}>{latest(s) ? fmtDateTime(latest(s)) : '—'}</span> },
+    { key: 'act', label: '', actions: true, render: s => <button className="ghost sm" onClick={() => refreshOne(s.wallet_id)} disabled={refreshingId === s.wallet_id}>{refreshingId === s.wallet_id ? 'Refreshing…' : 'Refresh'}</button> },
+  ]
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 16 }}>
-        <Card><StatTile label="Total USD" value={fmtUsd(totalUsd)} tone="signal" /></Card>
-        <Card><StatTile label="Funded Wallets" value={fundedCount} tone="default" /></Card>
-        <Card><StatTile label="Empty Wallets" value={emptyCount} tone="rose" /></Card>
-        <Card><StatTile label="Gas Wallets" value={gasWalletCount} tone="amber" /></Card>
+    <div className="stack">
+      <PageHeader title="Balances" subtitle="Last known balances per wallet. “Refresh all” reads every wallet on-chain." />
+
+      <div className="grid-stats">
+        <Card><StatTile label="Total USD" value={loading ? '…' : fmtUsd(totals.usd)} tone="signal" /></Card>
+        <Card><StatTile label="Funded" value={loading ? '…' : totals.funded} /></Card>
+        <Card><StatTile label="Empty" value={loading ? '…' : totals.empty} tone="rose" /></Card>
+        <Card><StatTile label="Gas wallets" value={loading ? '…' : totals.gas} tone="amber" /></Card>
       </div>
 
       <Card
-        title="Wallet Balances"
+        title="Wallet balances"
         action={
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <select value={filter} onChange={e => setFilter(e.target.value)} className="mono" style={{ fontSize: 13 }}>
-              <option value="all">All wallets</option>
-              <option value="funded">Funded only</option>
-              <option value="empty">Empty only</option>
-            </select>
-            <button className="ghost sm" onClick={refreshAll} disabled={refreshingAll}>
-              {refreshingAll ? <Spinner inline size={14} /> : 'Refresh All (on-chain)'}
-            </button>
+          <div className="row">
+            <Segmented value={filter} onChange={setFilter} options={['all', 'funded', 'empty']} />
+            <button className="sm" onClick={refreshAll} disabled={refreshingAll}>{refreshingAll ? 'Reading chains…' : 'Refresh all (on-chain)'}</button>
           </div>
         }
       >
-        {actionMessage && <div style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>{actionMessage}</div>}
-
-        {initialLoad ? (
-          <div className="table-scroll"><table><tbody><SkeletonRows rows={5} cols={5} /></tbody></table></div>
-        ) : summaries.length === 0 ? (
-          <EmptyState icon="◇" title="No wallets yet" hint="Generate or import a wallet first, then refresh balances." />
-        ) : (
-          <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>Wallet</th>
-                <th>Status</th>
-                <th>Total USD</th>
-                <th>Tokens</th>
-                <th>Last Updated</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {visible.map(s => {
-                const isOpen = expanded === s.wallet_id
-                const lastUpdated = s.balances.length
-                  ? s.balances.reduce((latest, b) => (!latest || (b.last_updated && b.last_updated > latest)) ? b.last_updated : latest, null)
-                  : null
-                return (
-                  <React.Fragment key={s.wallet_id}>
-                    <tr style={{ cursor: s.balances.length ? 'pointer' : 'default' }} onClick={() => s.balances.length && setExpanded(isOpen ? null : s.wallet_id)}>
-                      <td className="mono">
-                        {truncate(s.address)}
-                        {s.is_gas_wallet && <span style={{ marginLeft: 6 }}><Badge status="pending">gas</Badge></span>}
-                      </td>
-                      <td><Badge status={s.status}>{s.status}</Badge></td>
-                      <td className="mono" style={{ fontWeight: 600, color: (s.total_usd || 0) > 0 ? 'var(--signal)' : 'var(--text-faint)' }}>
-                        {fmtUsd(s.total_usd)}
-                      </td>
-                      <td style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-                        {s.balances.length ? `${s.balances.length} token(s) ${isOpen ? '▲' : '▼'}` : 'no data yet'}
-                      </td>
-                      <td style={{ fontSize: 12, color: 'var(--text-faint)' }}>
-                        {lastUpdated ? new Date(lastUpdated).toLocaleString() : '—'}
-                      </td>
-                      <td onClick={e => e.stopPropagation()}>
-                        <button className="ghost sm" onClick={() => refreshOne(s.wallet_id)} disabled={refreshingWallet === s.wallet_id}>
-                          {refreshingWallet === s.wallet_id ? <Spinner inline size={12} /> : 'Refresh'}
-                        </button>
-                      </td>
-                    </tr>
-                    {isOpen && s.balances.map((b, i) => (
-                      <tr key={i} style={{ background: 'var(--bg)' }}>
-                        <td colSpan={2} style={{ paddingLeft: 32, fontSize: 12.5, color: 'var(--text-dim)' }}>
-                          chain #{b.chain_id} · {b.token_symbol}
-                        </td>
-                        <td className="mono" style={{ fontSize: 12.5 }}>{fmtUsd(b.usd_value)}</td>
-                        <td className="mono" style={{ fontSize: 12.5 }}>{fmtBalance(b.balance)} {b.token_symbol}</td>
-                        <td colSpan={2} style={{ fontSize: 11, color: 'var(--text-faint)' }}>
-                          {b.last_updated ? new Date(b.last_updated).toLocaleString() : ''}
-                        </td>
-                      </tr>
-                    ))}
-                  </React.Fragment>
-                )
-              })}
-            </tbody>
-          </table>
-          </div>
-        )}
+        {error && <div className="error" style={{ marginBottom: 12 }}>{error}</div>}
+        <DataTable
+          columns={columns} rows={visible} loading={loading} skeletonRows={5} rowKey="wallet_id"
+          onRowClick={s => s.balances.length && setExpanded(e => (e === s.wallet_id ? null : s.wallet_id))}
+          expanded={expanded}
+          renderExpanded={s => (
+            <div className="stack-sm" style={{ padding: '6px 4px' }}>
+              {s.balances.map((b, i) => (
+                <div key={i} className="row-between" style={{ fontSize: 12.5 }}>
+                  <span className="muted">chain #{b.chain_id} · {b.token_symbol}</span>
+                  <span className="mono">{fmtBalance(b.balance)} {b.token_symbol} <span className="faint">· {fmtUsd(b.usd_value)}</span></span>
+                </div>
+              ))}
+            </div>
+          )}
+          empty={<EmptyState icon="◇" title={summaries.length ? 'No wallets in this view' : 'No wallets yet'} hint={summaries.length ? 'Try another filter.' : 'Generate or import a wallet first, then refresh balances.'} />}
+        />
       </Card>
     </div>
   )

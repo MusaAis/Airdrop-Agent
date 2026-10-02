@@ -1,184 +1,144 @@
-import React, { useEffect, useState } from 'react'
+import React, { useMemo, useState } from 'react'
 import api from '../api'
-import Spinner from '../components/Spinner'
+import useApi, { apiError } from '../hooks/useApi'
+import { useToast } from '../components/Toast'
+import { useConfirm } from '../components/Confirm'
 import WalletManage from '../components/WalletManage'
-import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
+import { Card, Badge, PageHeader, StatTile, EmptyState, DataTable, Segmented, Field } from '../components/ui'
+import { shortAddr } from '../lib/format'
 
-function truncate(addr) {
-  if (!addr || addr.length < 12) return addr
-  return `${addr.slice(0, 6)}…${addr.slice(-4)}`
-}
+const FILTERS = ['all', 'active', 'paused', 'cooldown', 'archived']
 
-export default function Wallets({ token }) {
-  const [wallets, setWallets] = useState([])
+export default function Wallets() {
+  const toast = useToast()
+  const confirm = useConfirm()
+  const { data, loading, reload } = useApi(() => api.get('/wallets/').then(r => r.data), [])
+  const wallets = Array.isArray(data) ? data : []
+
   const [count, setCount] = useState(1)
   const [privKey, setPrivKey] = useState('')
-  const [importWarning, setImportWarning] = useState(false)
-  const [loading, setLoading] = useState(false)
-  const [initialLoad, setInitialLoad] = useState(true)
-  const [actionMessage, setActionMessage] = useState('')
-  const [copiedId, setCopiedId] = useState(null)
+  const [busy, setBusy] = useState(false)
   const [managing, setManaging] = useState(null)
+  const [filter, setFilter] = useState('all')
 
-  const fetchWallets = async () => {
-    setLoading(true)
-    try {
-      const r = await api.get('/wallets/')
-      setWallets(r.data)
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setLoading(false)
-      setInitialLoad(false)
-    }
+  const run = async (fn, ok) => {
+    setBusy(true)
+    try { await fn(); if (ok) toast.success(ok); await reload() }
+    catch (e) { toast.error(apiError(e)) }
+    finally { setBusy(false) }
   }
 
-  useEffect(() => { fetchWallets() }, [])
-
-  const generate = async () => {
-    setActionMessage('')
-    setLoading(true)
-    try {
-      await api.post('/wallets/generate', { count, start_index: wallets.length })
-      fetchWallets()
-    } catch (e) {
-      setActionMessage('Error generating wallets')
-    } finally {
-      setLoading(false)
-    }
+  const generate = () => {
+    const n = Math.max(1, Math.min(100, Number(count) || 1))
+    return run(() => api.post('/wallets/generate', { count: n, start_index: wallets.length }), `Generated ${n} wallet(s).`)
   }
 
   const importWallet = async () => {
-    if (!privKey) return alert('Private key required')
-    if (!importWarning) {
-      setImportWarning(true)
-      return
-    }
-    setActionMessage('')
-    setLoading(true)
-    try {
-      await api.post('/wallets/import', { private_key: privKey, tags: [] })
-      setPrivKey('')
-      setImportWarning(false)
-      fetchWallets()
-    } catch (e) {
-      setActionMessage('Error importing wallet')
-    } finally {
-      setLoading(false)
-    }
+    const key = privKey.trim()
+    if (!key) return toast.error('Paste a private key first.')
+    const ok = await confirm({
+      title: 'Send a raw private key?',
+      message: 'The key is sent over the network to your server and stored encrypted. Only continue if you fully trust this server and connection — generating HD wallets is safer.',
+      confirmLabel: 'Import key', tone: 'danger',
+    })
+    if (!ok) return
+    await run(() => api.post('/wallets/import', { private_key: key, tags: [] }), 'Wallet imported.')
+    setPrivKey('')
   }
 
-  const toggleStatus = async (id, status) => {
-    setActionMessage('')
-    setLoading(true)
-    try {
-      await api.put(`/wallets/${id}/status?status=${status}`)
-      fetchWallets()
-    } catch (e) {
-      setActionMessage('Error updating wallet')
-    } finally {
-      setLoading(false)
-    }
+  const setStatus = (id, status, ok) => run(() => api.put(`/wallets/${id}/status?status=${status}`), ok)
+
+  const archive = async w => {
+    if (await confirm({ title: `Archive wallet #${w.id}?`, message: 'It stops running tasks. You can activate it again later.', confirmLabel: 'Archive', tone: 'danger' }))
+      setStatus(w.id, 'archived', 'Wallet archived.')
   }
 
-  const copyAddress = (addr, id) => {
-    navigator.clipboard?.writeText(addr)
-    setCopiedId(id)
-    setTimeout(() => setCopiedId(null), 1200)
-  }
+  const copy = w => { navigator.clipboard?.writeText(w.address); toast.info('Address copied') }
 
-  const activeCount = wallets.filter(w => w.status === 'active').length
+  const counts = useMemo(() => {
+    const c = { active: 0, paused: 0, gas: 0 }
+    for (const w of wallets) { if (w.status === 'active') c.active++; if (w.status === 'paused') c.paused++; if (w.is_gas_wallet) c.gas++ }
+    return c
+  }, [wallets])
+
+  const visible = filter === 'all' ? wallets : wallets.filter(w => w.status === filter)
+
+  const columns = [
+    { key: 'id', label: 'ID', render: w => <span className="mono muted">{w.id}</span> },
+    {
+      key: 'address', label: 'Address',
+      render: w => (
+        <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+          <button className="ghost sm mono" style={{ padding: '4px 8px', fontSize: 12.5 }} title={w.address} onClick={() => copy(w)}>{shortAddr(w.address)}</button>
+          {w.is_gas_wallet && <Badge tone="warning">gas</Badge>}
+        </span>
+      ),
+    },
+    { key: 'status', label: 'Status', render: w => <Badge status={w.status}>{w.status}</Badge> },
+    { key: 'health', label: 'Health', num: true, render: w => <span className="mono">{w.health_score ?? '—'}</span> },
+    {
+      key: 'sybil', label: 'Sybil', num: true,
+      render: w => <span className="mono" style={{ color: (w.sybil_risk_score ?? 0) > 60 ? 'var(--rose)' : (w.sybil_risk_score ?? 0) > 30 ? 'var(--amber)' : 'inherit' }}>{w.sybil_risk_score ?? 0}</span>,
+    },
+    {
+      key: 'actions', label: 'Actions', actions: true,
+      render: w => (
+        <div className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+          {w.status !== 'active' && <button className="sm" disabled={busy} onClick={() => setStatus(w.id, 'active', 'Wallet activated.')}>Activate</button>}
+          {w.status !== 'paused' && w.status !== 'archived' && <button className="sm" disabled={busy} onClick={() => setStatus(w.id, 'paused', 'Wallet paused.')}>Pause</button>}
+          <button className="sm" onClick={() => setManaging(w.id)}>Manage</button>
+          {w.status !== 'archived' && <button className="sm danger" disabled={busy} onClick={() => archive(w)}>Archive</button>}
+        </div>
+      ),
+    },
+  ]
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-          <span className="mono" style={{ fontSize: 22, fontWeight: 600 }}>{wallets.length}</span>
-          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>total wallets</span>
-        </div>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}>
-          <span className="mono" style={{ fontSize: 22, fontWeight: 600, color: 'var(--signal)' }}>{activeCount}</span>
-          <span style={{ fontSize: 13, color: 'var(--text-dim)' }}>active</span>
-        </div>
+    <div className="stack">
+      <PageHeader title="Wallets" subtitle="Generate HD wallets from your seed, or import a single key. Tap an address to copy it." />
+
+      <div className="grid-stats">
+        <Card><StatTile label="Total" value={loading ? '…' : wallets.length} /></Card>
+        <Card><StatTile label="Active" value={loading ? '…' : counts.active} tone="signal" /></Card>
+        <Card><StatTile label="Paused" value={loading ? '…' : counts.paused} tone="amber" /></Card>
+        <Card><StatTile label="Gas wallets" value={loading ? '…' : counts.gas} tone="violet" /></Card>
       </div>
 
       <div className="grid">
         <Card title="Generate HD wallets">
-          <p style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: -8, marginBottom: 14 }}>
-            Derives new wallets from your configured seed phrase. Safe and recommended.
-          </p>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
-            <input type="number" value={count} onChange={e => setCount(Number(e.target.value))} min={1} />
-            <button className="primary" onClick={generate} disabled={loading}>Generate</button>
+          <p className="hint" style={{ marginBottom: 14 }}>Derives new wallets from your configured seed phrase. Safe and recommended.</p>
+          <div className="row">
+            <input type="number" value={count} min={1} max={100} onChange={e => setCount(e.target.value)} aria-label="How many wallets" />
+            <button className="primary" onClick={generate} disabled={busy}>Generate</button>
           </div>
         </Card>
 
         <Card title="Import private key">
-          <p style={{ fontSize: 12.5, color: 'var(--text-dim)', marginTop: -8, marginBottom: 14 }}>
-            Only do this on a server you fully trust.
-          </p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <p className="hint" style={{ marginBottom: 14 }}>Only do this on a server you fully trust. The key is hidden while you type.</p>
+          <div className="row" style={{ flexWrap: 'nowrap' }}>
             <input
-              type="text"
-              placeholder="0x… private key"
-              value={privKey}
-              onChange={e => setPrivKey(e.target.value)}
-              style={{ width: '100%' }}
+              className="grow mono" type="password" autoComplete="off" autoCapitalize="off" spellCheck={false}
+              placeholder="0x… private key" value={privKey} onChange={e => setPrivKey(e.target.value)}
             />
-            {importWarning && (
-              <div className="error">
-                ⚠ You're about to send a raw private key over the network. Only continue if you fully trust this server — HD wallets are safer.
-              </div>
-            )}
-            <button className={importWarning ? 'danger' : ''} onClick={importWallet} disabled={loading} style={{ alignSelf: 'flex-start' }}>
-              {importWarning ? 'Confirm import' : 'Import private key'}
-            </button>
+            <button onClick={importWallet} disabled={busy || !privKey.trim()}>Import</button>
           </div>
         </Card>
       </div>
 
-      {loading && !initialLoad && <Spinner inline label="Working…" />}
-      {actionMessage && <p className="error">{actionMessage}</p>}
-
-      {managing && <WalletManage wallet={wallets.find(x => x.id === managing)} onChanged={fetchWallets} onClose={() => setManaging(null)} />}
-
-      <Card title="All wallets">
-        <div className="table-scroll"><table>
-          <thead>
-            <tr><th>ID</th><th>Address</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th></tr>
-          </thead>
-          <tbody>
-            {initialLoad && <SkeletonRows rows={4} cols={4} />}
-            {!initialLoad && wallets.map(w => (
-              <tr key={w.id}>
-                <td className="mono" style={{ color: 'var(--text-dim)' }}>{w.id}</td>
-                <td>
-                  <button
-                    className="ghost sm mono"
-                    onClick={() => copyAddress(w.address, w.id)}
-                    style={{ padding: '4px 8px', fontSize: 12.5 }}
-                    title={w.address}
-                  >
-                    {copiedId === w.id ? 'Copied ✓' : truncate(w.address)}
-                  </button>
-                </td>
-                <td><Badge status={w.status}>{w.status}</Badge></td>
-                <td>
-                  <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                    {w.status !== 'active' && <button className="sm" onClick={() => toggleStatus(w.id, 'active')}>Activate</button>}
-                    {w.status !== 'paused' && <button className="sm" onClick={() => toggleStatus(w.id, 'paused')}>Pause</button>}
-                    <button className="sm" onClick={() => setManaging(managing === w.id ? null : w.id)}>Manage</button>
-                    <button className="sm danger" onClick={() => toggleStatus(w.id, 'archived')}>Archive</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table></div>
-        {!initialLoad && wallets.length === 0 && (
-          <EmptyState icon="◇" title="No wallets yet" hint="Generate HD wallets or import a private key to get started." />
-        )}
+      <Card title="All wallets" action={<Segmented value={filter} onChange={setFilter} options={FILTERS} />}>
+        <DataTable
+          columns={columns} rows={visible} loading={loading}
+          empty={<EmptyState icon="◇" title={wallets.length ? 'No wallets in this view' : 'No wallets yet'} hint={wallets.length ? 'Try another filter.' : 'Generate HD wallets or import a private key to get started.'} />}
+        />
       </Card>
+
+      {managing && (
+        <WalletManage
+          wallet={wallets.find(x => x.id === managing)}
+          onChanged={reload}
+          onClose={() => setManaging(null)}
+        />
+      )}
     </div>
   )
 }

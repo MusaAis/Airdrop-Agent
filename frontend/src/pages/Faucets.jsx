@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
 import Spinner from '../components/Spinner'
+import { useConfirm } from '../components/Confirm'
 import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
 
 const EMPTY_FORM = {
@@ -19,6 +20,7 @@ const EMPTY_FORM = {
 const EMPTY_TOKEN_FORM = { token_symbol: '', token_contract: '', amount_given: '', decimals: 18 }
 
 export default function Faucets({ token }) {
+  const confirm = useConfirm()
   const [faucets, setFaucets] = useState([])
   const [chains, setChains] = useState([])
   const [wallets, setWallets] = useState([])
@@ -124,7 +126,7 @@ export default function Faucets({ token }) {
   }
 
   const deleteFaucet = async (f) => {
-    if (!window.confirm(`Delete faucet "${f.name}"? This cannot be undone.`)) return
+    if (!(await confirm({ title: `Delete faucet “${f.name}”?`, message: 'This cannot be undone.', confirmLabel: 'Delete', tone: 'danger' }))) return
     setLoading(true)
     try {
       await api.delete(`/faucets/${f.id}`)
