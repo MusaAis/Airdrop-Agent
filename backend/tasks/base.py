@@ -8,7 +8,7 @@ from web3 import AsyncWeb3
 from backend.models import Chain, Wallet, TaskConfig, Project, Transaction, TokenApproval
 from backend.database import async_session
 from backend.chains.rpc_pool import get_web3
-from backend.wallet.balance import get_gas_token_balance
+from backend.wallet.balance import get_gas_token_balance, fee_to_gas_token
 from backend.core.nonce_manager import lock_nonce, release_nonce
 from backend.chains.price_oracle import get_usd_price
 from backend.chains.gas import get_current_gas_price, is_gas_spike
@@ -80,7 +80,9 @@ class BaseTask:
         gas_estimation = await self.estimate_gas()
         # 8. Check gas token balance >= estimate + 20% buffer
         gas_balance = await get_gas_token_balance(self.chain, self.wallet.address)
-        required_gas = gas_estimation * Decimal("1.2")
+        # gas_estimation is in the chain's smallest unit (wei); gas_balance is in human
+        # units (ether). Convert before comparing, otherwise every task skips as low_gas.
+        required_gas = fee_to_gas_token(self.chain, gas_estimation) * Decimal("1.2")
         if gas_balance < required_gas:
             logger.warning(f"Low gas for {self.wallet.address}: {gas_balance} < {required_gas}")
             return {"status": "skipped", "reason": "low_gas"}
@@ -110,19 +112,36 @@ class BaseTask:
             #     calling handle_approval(), let it acquire+use+release its own
             #     nonce for the approval tx, then re-lock to get a *fresh* nonce
             #     for the main tx (which will correctly be approval_nonce + 1).
+            #
+            #     Dry-run: the approval is a REAL broadcast (spends gas, sets an
+            #     on-chain allowance), so it must never happen in dry-run. We skip
+            #     it, keep the nonce we already hold, and skip the eth_call below
+            #     (it would revert for lack of allowance and fail the dry run).
+            from backend.core.kill_switch import is_dry_run as _is_dry_run
+            approval_deferred = False
             if getattr(self, 'needs_approval', False):
-                await release_nonce(self.db, self.wallet.id, self.chain.id, increment=False)
-                approval_result = await self.handle_approval()
-                if not approval_result["success"]:
-                    return approval_result
-                # Re-lock to get a fresh nonce for the main tx, and rebuild the
-                # tx params with it (the old `nonce`/tx_params are now stale —
-                # the approval tx consumed the nonce they were built with).
-                nonce = await lock_nonce(self.db, self.wallet.id, self.chain.id)
-                tx_params = await self.build_transaction_params(nonce)
+                if _is_dry_run():
+                    approval_deferred = True
+                    logger.info(
+                        f"[DRY RUN] {self.task_type} for wallet={self.wallet.address} needs a "
+                        f"token approval - not broadcasting it"
+                    )
+                else:
+                    await release_nonce(self.db, self.wallet.id, self.chain.id, increment=False)
+                    approval_result = await self.handle_approval()
+                    if not approval_result["success"]:
+                        return approval_result
+                    # Re-lock to get a fresh nonce for the main tx, and rebuild the
+                    # tx params with it (the old `nonce`/tx_params are now stale —
+                    # the approval tx consumed the nonce they were built with).
+                    nonce = await lock_nonce(self.db, self.wallet.id, self.chain.id)
+                    tx_params = await self.build_transaction_params(nonce)
 
             # 11. Simulate tx (dry run) with the real nonce — pre-flight check
-            sim_result = await self.simulate_transaction_with_params(tx_params)
+            if approval_deferred:
+                sim_result = {"success": True, "skipped": "approval not sent (dry run)"}
+            else:
+                sim_result = await self.simulate_transaction_with_params(tx_params)
             if not sim_result["success"]:
                 await release_nonce(self.db, self.wallet.id, self.chain.id, increment=False)
                 return {"status": "failed", "reason": "simulation_failed", "details": sim_result}

@@ -27,10 +27,10 @@ async def simulate_task(task_instance, nonce: int = 0) -> Dict[str, Any]:
         task_instance.w3 = await get_web3(task_instance.chain)
 
         # Check 1: gas balance
-        from backend.wallet.balance import get_gas_token_balance
+        from backend.wallet.balance import get_gas_token_balance, fee_to_gas_token
         gas_balance = await get_gas_token_balance(task_instance.chain, task_instance.wallet.address)
         gas_est = await task_instance.estimate_gas()
-        required = gas_est * Decimal("1.2")
+        required = fee_to_gas_token(task_instance.chain, gas_est) * Decimal("1.2")
         gas_ok = gas_balance >= required
         results["checks"]["gas_balance"] = {
             "balance": float(gas_balance),

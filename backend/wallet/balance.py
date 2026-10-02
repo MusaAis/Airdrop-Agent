@@ -8,6 +8,15 @@ import logging
 
 logger = logging.getLogger("airdrop.balance")
 
+def fee_to_gas_token(chain: Chain, fee_wei) -> Decimal:
+    """Convert a fee estimate (gas units x gas price, i.e. the chain's smallest unit)
+    into the same human units get_gas_token_balance() returns, so the two can be
+    compared. check_native_balance divides by 1e18; an ERC20 gas token is divided
+    by chain.gas_token_decimals."""
+    decimals = 18 if chain.gas_token_is_native else int(chain.gas_token_decimals or 18)
+    return Decimal(fee_wei) / Decimal(10 ** decimals)
+
+
 async def check_native_balance(w3: AsyncWeb3, address: str) -> Decimal:
     balance_wei = await w3.eth.get_balance(address)
     return Decimal(balance_wei) / Decimal(10**18)

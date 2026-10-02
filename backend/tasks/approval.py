@@ -5,7 +5,7 @@ from typing import Dict
 from web3 import AsyncWeb3
 from decimal import Decimal
 from backend.core.nonce_manager import lock_nonce, release_nonce
-from backend.wallet.balance import get_gas_token_balance
+from backend.wallet.balance import get_gas_token_balance, fee_to_gas_token
 
 logger = logging.getLogger("airdrop.approval")
 
@@ -58,7 +58,7 @@ async def handle_token_approval(task) -> Dict:
 
         # Re-check gas balance
         gas_balance = await get_gas_token_balance(task.chain, task.wallet.address)
-        required_gas = await task.estimate_gas() * Decimal("1.2")
+        required_gas = fee_to_gas_token(task.chain, await task.estimate_gas()) * Decimal("1.2")
         if gas_balance < required_gas:
             return {"success": False, "reason": "low_gas_after_approval"}
 
