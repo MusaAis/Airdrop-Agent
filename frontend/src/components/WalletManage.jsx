@@ -5,14 +5,15 @@ import { useToast } from './Toast'
 import { useConfirm } from './Confirm'
 import { Modal, Badge, Field } from './ui'
 
-const num = v => (v === '' || v == null ? null : Number(v))
-
+// [key, label, nullable]. Blank NULLABLE fields are sent as null (= clear the override);
+// blank REQUIRED fields are left out so the server keeps their value. Sending null for a
+// required field used to hit a NOT NULL column and return a 500.
 const NUM_FIELDS = [
-  ['amount_min_override', 'Amount min override'], ['amount_max_override', 'Amount max override'],
-  ['active_hour_start', 'Active from (UTC hour)'], ['active_hour_end', 'Active until (UTC hour)'],
-  ['start_offset_max_mins', 'Start offset max (min)'], ['sleep_min_mins', 'Sleep min (min)'],
-  ['sleep_max_mins', 'Sleep max (min)'], ['gas_multiplier', 'Gas multiplier'],
-  ['daily_tx_min', 'Daily tx min'], ['daily_tx_max', 'Daily tx max'],
+  ['amount_min_override', 'Amount min override', true], ['amount_max_override', 'Amount max override', true],
+  ['active_hour_start', 'Active from (UTC hour 0-23)', true], ['active_hour_end', 'Active until (UTC hour 0-23)', true],
+  ['start_offset_max_mins', 'Start offset max (min)', false], ['sleep_min_mins', 'Sleep min (min)', false],
+  ['sleep_max_mins', 'Sleep max (min)', false], ['gas_multiplier', 'Gas multiplier (0.5-3.0)', false],
+  ['daily_tx_min', 'Daily tx min', false], ['daily_tx_max', 'Daily tx max', false],
 ]
 
 /** Wallet manager — opens as a modal (a bottom sheet on phones). */
@@ -25,12 +26,13 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
   const [nonces, setNonces] = useState([])
   const [chains, setChains] = useState([])
 
+  const loadSettings = () => api.get(`/wallets/${id}/settings`).then(r => setS(r.data)).catch(() => setS({}))
   const loadNonces = () => api.get(`/ops/wallets/${id}/nonces`).then(r => setNonces(r.data)).catch(() => {})
 
   useEffect(() => {
     if (!id) return
     setTags((wallet.tags || []).join(', ')); setS(null)
-    api.get(`/wallets/${id}/settings`).then(r => setS(r.data)).catch(() => setS({}))
+    loadSettings()
     api.get('/chains/').then(r => setChains(r.data)).catch(() => {})
     loadNonces()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -44,12 +46,23 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
     catch (e) { toast.error(apiError(e)) }
   }
 
-  const saveSettings = () => act(() => api.put(`/wallets/${id}/settings`, {
-    ...Object.fromEntries(NUM_FIELDS.map(([k]) => [k, num(s[k])])),
-    amount_distribution: s.amount_distribution || 'weighted_low',
-    amount_vary_daily: !!s.amount_vary_daily,
-    bidirectional_default: !!s.bidirectional_default,
-  }), 'Settings saved.')
+  const saveSettings = () => {
+    const payload = {
+      amount_distribution: s.amount_distribution || 'weighted_low',
+      amount_vary_daily: !!s.amount_vary_daily,
+      bidirectional_default: !!s.bidirectional_default,
+    }
+    for (const [k, , nullable] of NUM_FIELDS) {
+      const v = s[k]
+      if (v === '' || v == null) { if (nullable) payload[k] = null } else payload[k] = Number(v)
+    }
+    return act(() => api.put(`/ops/wallets/${id}/settings`, payload).then(r => { loadSettings(); return r }), 'Settings saved.')
+  }
+
+  const reroll = async () => {
+    if (await confirm({ title: 'Re-roll persona?', message: "Replaces this wallet's behaviour settings with a new random persona.", confirmLabel: 'Re-roll' }))
+      act(() => api.post(`/ops/wallets/${id}/persona/reroll`).then(r => { loadSettings(); return r }))
+  }
 
   const blacklist = async () => {
     if (await confirm({ title: `Blacklist wallet #${id}?`, message: 'The agent will never use it again until you change its status.', confirmLabel: 'Blacklist', tone: 'danger' }))
@@ -98,7 +111,10 @@ export default function WalletManage({ wallet, onChanged, onClose }) {
                 <label className="check"><input type="checkbox" checked={!!s.amount_vary_daily} onChange={e => setS({ ...s, amount_vary_daily: e.target.checked })} /> vary amounts daily</label>
                 <label className="check"><input type="checkbox" checked={!!s.bidirectional_default} onChange={e => setS({ ...s, bidirectional_default: e.target.checked })} /> bidirectional by default</label>
               </div>
-              <button className="primary sm" onClick={saveSettings}>Save settings</button>
+              <div className="row">
+                <button className="primary sm" onClick={saveSettings}>Save settings</button>
+                <button className="sm" onClick={reroll}>Re-roll persona</button>
+              </div>
             </>
           )}
         </div>

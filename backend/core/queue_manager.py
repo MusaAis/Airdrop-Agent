@@ -132,6 +132,12 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
         select(Wallet).where(Wallet.status == "active", Wallet.is_gas_wallet == False)
     )
     wallets = wallets_result.scalars().all()
+    # The master seed is memory-only, so it is locked after every restart. HD wallets
+    # cannot sign while it is locked; scheduling them anyway racks up failures, pushes
+    # them into cooldown (3) and trips project circuit breakers (5).
+    from backend.wallet.hd_generator import get_master_seed
+    if get_master_seed() is None:
+        wallets = [w for w in wallets if not w.is_hd]
 
     tasks = await list_task_configs(db, project_id=project.id)
     enabled_tasks = [t for t in tasks if t.enabled]

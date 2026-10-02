@@ -1,57 +1,93 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useState } from 'react'
 import api from '../api'
-import { Card, Badge } from './ui'
+import useApi, { apiError } from '../hooks/useApi'
+import { useToast } from './Toast'
 import { useConfirm } from './Confirm'
+import { Card, Badge, SkeletonBlock } from './ui'
 
 export default function SystemPanel() {
+  const toast = useToast()
   const confirm = useConfirm()
-  const [s, setS] = useState(null)
+  const { data: s, reload } = useApi(() => api.get('/ops/system').then(r => r.data), [], { interval: 15000 })
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState('')
+  const [pw, setPw] = useState('')
 
-  const load = useCallback(() => api.get('/ops/system').then(r => setS(r.data)).catch(() => setMsg('Could not load system state.')), [])
-  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t) }, [load])
-
-  const run = async (fn) => {
-    setBusy(true); setMsg('')
-    try { await fn() } catch (e) { setMsg(e?.response?.data?.detail || 'Request failed.') } finally { setBusy(false) }
+  // run an API call, toast its message, then refresh (agent start/stop take a moment to show)
+  const act = async (fn, ask) => {
+    if (ask && !(await confirm(ask))) return
+    setBusy(true)
+    try {
+      const r = await fn()
+      if (r?.data?.message) toast.success(r.data.message)
+    } catch (e) { toast.error(apiError(e)) }
+    finally { setBusy(false); reload(); setTimeout(reload, 1500) }
   }
 
-  const toggleDry = () => run(async () => {
-    const r = await api.post('/ops/system/dry-run', { enabled: !s.dry_run })
-    setS(r.data)
-  })
-  const clearStop = () => run(async () => {
-    if (!(await confirm({ title: 'Clear the emergency stop?', message: 'Start the agent afterwards if it is stopped.', confirmLabel: 'Clear stop' }))) return
-    const r = await api.post('/ops/system/emergency/clear')
-    setS(r.data); setMsg(r.data.message)
-  })
-  const archive = () => run(async () => {
-    const r = await api.post('/ops/system/archive-logs')
-    setMsg(`Archived ${r.data.logs_archived} log(s), purged ${r.data.rpc_logs_purged} RPC log(s).`)
+  const unlock = () => pw && act(async () => {
+    const r = await api.post('/ops/system/unlock', { master_password: pw })
+    setPw('')
+    return r
   })
 
   return (
     <Card title="System controls">
-      {!s ? <div className="skeleton" style={{ height: 50, borderRadius: 10 }} /> : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+      {!s ? <SkeletonBlock height={50} /> : (
+        <div className="stack-sm" style={{ gap: 14 }}>
+          <div className="row">
             <Badge status={s.agent_running ? 'active' : 'paused'}>agent {s.agent_running ? 'running' : 'stopped'}</Badge>
             <Badge status={s.dry_run ? 'pending' : 'active'}>{s.dry_run ? 'dry-run ON' : 'live'}</Badge>
+            <Badge status={s.seed_loaded ? 'active' : 'failed'}>{s.seed_loaded ? 'seed unlocked' : 'seed locked'}</Badge>
             {s.emergency_stop && <Badge status="failed">emergency stop</Badge>}
           </div>
 
-          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-            <button className={s.dry_run ? 'primary sm' : 'sm'} onClick={toggleDry} disabled={busy}>
+          {!s.seed_loaded && (
+            <div className="stack-sm">
+              <div className="row" style={{ flexWrap: 'nowrap' }}>
+                <input
+                  className="grow" type="password" placeholder="Master password" value={pw}
+                  onChange={e => setPw(e.target.value)} onKeyDown={e => e.key === 'Enter' && unlock()}
+                  autoComplete="current-password"
+                />
+                <button className="primary sm" onClick={unlock} disabled={busy || !pw}>Unlock seed</button>
+              </div>
+              <p className="hint">The seed lives in memory only, so it is locked after every backend restart. While locked, HD wallets are not scheduled.</p>
+            </div>
+          )}
+
+          <div className="row">
+            {!s.agent_running && !s.emergency_stop && (
+              <button className="primary sm" disabled={busy} onClick={() => act(() => api.post('/ops/system/agent/start'))}>Start agent</button>
+            )}
+            {s.agent_running && (
+              <button className="sm" disabled={busy}
+                onClick={() => act(() => api.post('/ops/system/agent/stop'), { title: 'Stop the agent?', message: 'Tasks already running will finish first.', confirmLabel: 'Stop agent', tone: 'danger' })}>
+                Stop agent
+              </button>
+            )}
+            {!s.emergency_stop && (
+              <button className="sm danger" disabled={busy}
+                onClick={() => act(() => api.post('/agent/kill', null, { params: { reason: 'dashboard' } }), { title: 'Emergency stop?', message: 'Clears the queue and halts the agent. A transaction that is already broadcast cannot be undone.', confirmLabel: 'Emergency stop', tone: 'danger' })}>
+                Emergency stop
+              </button>
+            )}
+            {s.emergency_stop && (
+              <button className="sm danger" disabled={busy}
+                onClick={() => act(() => api.post('/ops/system/emergency/clear'), { title: 'Clear the emergency stop?', message: 'Start the agent afterwards.', confirmLabel: 'Clear stop' })}>
+                Clear emergency stop
+              </button>
+            )}
+            <button className={s.dry_run ? 'primary sm' : 'sm'} disabled={busy} onClick={() => act(() => api.post('/ops/system/dry-run', { enabled: !s.dry_run }))}>
               {s.dry_run ? 'Turn dry-run OFF (go live)' : 'Turn dry-run ON'}
             </button>
-            {s.emergency_stop && <button className="sm danger" onClick={clearStop} disabled={busy}>Clear emergency stop</button>}
-            <button className="ghost sm" onClick={archive} disabled={busy}>Archive old logs now</button>
+            <button className="ghost sm" disabled={busy} onClick={() => act(async () => {
+              const r = await api.post('/ops/system/archive-logs')
+              return { data: { message: `Archived ${r.data.logs_archived} log(s), purged ${r.data.rpc_logs_purged} RPC log(s).` } }
+            })}>Archive old logs now</button>
           </div>
-          <p style={{ fontSize: 12, color: 'var(--text-faint)', margin: 0 }}>
-            Dry-run simulates every task and broadcasts nothing. It is kept in memory, so it resets to OFF when the backend restarts.
+          <p className="hint faint">
+            Dry-run: tasks you trigger manually are simulated and nothing is broadcast, and automatic queue filling is paused while it is on.
+            It is kept in memory and resets to OFF on restart.
           </p>
-          {msg && <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{msg}</div>}
         </div>
       )}
     </Card>

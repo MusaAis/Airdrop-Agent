@@ -10,7 +10,7 @@ from sqlalchemy import select
 from backend.database import async_session
 from backend.models import (
     ActiveTask, Wallet, TaskConfig, Project, Chain, AgentStatus, TaskDailyProgress,
-    WalletSettings
+    WalletSettings, Log
 )
 from backend.tasks.swap import SwapTask
 from backend.tasks.generic import InteractContractTask
@@ -103,6 +103,24 @@ class WorkerPool:
                 outcome=outcome, category=category, reason=reason,
             )
 
+        # Phase 7: write a Log row for every real success/failure. Before this, Log was
+        # only written in dry-run, so the live feed, /ws/recent-logs and the Telegram
+        # daily summary counts (which read Log) were empty for real runs. Skips are not
+        # logged (they are throttled into task_failures); dry-run 'simulated' rows are
+        # written by BaseTask itself. Never raises.
+        async def _log(status: str, tx_hash=None, error=None, gas_used=None):
+            try:
+                async with async_session() as ldb:
+                    ldb.add(Log(
+                        wallet_id=wallet.id, chain_id=chain.id, task_config_id=task_config.id,
+                        project_id=project.id, task_name=task_config.task_type, tx_hash=tx_hash,
+                        status=status, error_message=(error[:500] if error else None),
+                        gas_used=gas_used, is_dry_run=False, created_at=datetime.now(timezone.utc),
+                    ))
+                    await ldb.commit()
+            except Exception as e:
+                logger.error(f"Log write failed: {e}")
+
         async with async_session() as db:
             # Check if wallet+chain already has a DB active task row
             stmt = select(ActiveTask).where(
@@ -165,6 +183,7 @@ class WorkerPool:
             try:
                 result = await asyncio.wait_for(task_instance.execute(), timeout=480)
                 status = result.get("status")
+                log_entry = None
                 if status == "success":
                     today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                     progress = await get_or_create_daily_target(db, wallet.id, wallet.address, project.id, task_config, today_str)
@@ -174,6 +193,7 @@ class WorkerPool:
                     if project.consecutive_failures > 0:
                         from backend.projects.circuit_breaker import reset_circuit
                         await reset_circuit(db, project)
+                    log_entry = ("success", result.get("tx_hash"), None, (result.get("receipt") or {}).get("gasUsed"))
                 elif status == "failed":
                     wallet.failure_count += 1
                     if wallet.failure_count >= 3:
@@ -183,6 +203,7 @@ class WorkerPool:
                     await increment_failure(db, project)
                     category, reason = classify_result(result)
                     await _record("failed", category, reason)
+                    log_entry = ("failed", None, reason, None)
                 elif status == "skipped":
                     # Phase 5: a skip (gas spike, low gas, paused contract) is
                     # NOT a failure. Previously it incremented failure_count
@@ -192,6 +213,8 @@ class WorkerPool:
                     await _record("skipped", category, reason)
                 # any other status (e.g. "simulated" in dry-run): no counters
                 await db.commit()
+                if log_entry:
+                    await _log(*log_entry)
             except asyncio.TimeoutError:
                 logger.error(f"Task timed out after 8 min: wallet={wallet.id} chain={chain.id}")
                 await release_nonce(db, wallet.id, chain.id, increment=False)
@@ -199,12 +222,14 @@ class WorkerPool:
                 from backend.projects.circuit_breaker import increment_failure
                 await increment_failure(db, project)
                 await _record("failed", "task_timeout", "task exceeded the 8 minute limit")
+                await _log("failed", error="task exceeded the 8 minute limit")
             except Exception as e:
                 logger.error(f"Task execution error: {e}")
                 wallet.failure_count += 1
                 from backend.projects.circuit_breaker import increment_failure
                 await increment_failure(db, project)
                 await _record("failed", classify_error_text(str(e)), str(e))
+                await _log("failed", error=str(e))
             finally:
                 # Always remove active task row and in-memory key (fixes 3.1 and 3.2)
                 try:

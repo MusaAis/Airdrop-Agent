@@ -7,6 +7,7 @@ import { useConfirm } from '../components/Confirm'
 const err = e => e?.response?.data?.detail || 'Request failed.'
 const CRIT_TYPES = ['tx_count', 'volume', 'time', 'social', 'token_hold', 'governance', 'other']
 const EMPTY_C = { type: 'tx_count', description: '', threshold: '', unit: '', uncertain: false }
+const EMPTY_K = { chain_id: '', label: '', address: '' }
 
 export default function ProjectDetail() {
   const confirm = useConfirm()
@@ -16,6 +17,11 @@ export default function ProjectDetail() {
   const [criteria, setCriteria] = useState([])
   const [nc, setNc] = useState(EMPTY_C)
   const [edit, setEdit] = useState(null)   // {id, ...fields}
+  const [contracts, setContracts] = useState([])
+  const [tasks, setTasks] = useState([])
+  const [chains, setChains] = useState([])
+  const [basics, setBasics] = useState({ name: '', chain_ids: [] })
+  const [nk, setNk] = useState(EMPTY_K)
   const [msg, setMsg] = useState('')
 
   const load = useCallback(async () => {
@@ -27,7 +33,11 @@ export default function ProjectDetail() {
         website: pr.website || '', twitter: pr.twitter || '', discord: pr.discord || '', notes: pr.notes || '',
         tge_date: pr.tge_date || '', airdrop_date: pr.airdrop_date || '',
       })
+      setBasics({ name: pr.name, chain_ids: Array.isArray(pr.chain_ids) ? pr.chain_ids : [] })
       setCriteria((await api.get(`/ops/projects/${id}/criteria`)).data)
+      setContracts((await api.get(`/ops/projects/${id}/contracts`)).data)
+      setTasks((await api.get(`/projects/${id}/tasks`)).data)
+      setChains((await api.get('/chains/')).data)
     } catch (e) { setMsg(err(e)) }
   }, [id])
   useEffect(() => { load() }, [load])
@@ -45,6 +55,18 @@ export default function ProjectDetail() {
     website: f.website, twitter: f.twitter, discord: f.discord, notes: f.notes,
     tge_date: f.tge_date, airdrop_date: f.airdrop_date,
   }))
+  const saveBasics = () => basics.name.trim() && act(() => api.put(`/projects/${id}`, { name: basics.name.trim(), chain_ids: basics.chain_ids }), 'Saved.')
+  const toggleChain = cid => setBasics(b => ({ ...b, chain_ids: b.chain_ids.includes(cid) ? b.chain_ids.filter(x => x !== cid) : [...b.chain_ids, cid] }))
+  const addContract = () => {
+    if (!nk.chain_id || !nk.label.trim() || !nk.address.trim()) return setMsg('Chain, label and address are required.')
+    return act(async () => {
+      const r = await api.post(`/ops/projects/${id}/contracts`, { chain_id: Number(nk.chain_id), label: nk.label.trim(), address: nk.address.trim() })
+      setNk(EMPTY_K); return r
+    }, 'Contract added.')
+  }
+  const runAll = async () => (await confirm({ title: 'Run all enabled tasks once?', message: 'Queues one run of every enabled task, each on a different wallet.', confirmLabel: 'Queue them' })) &&
+    act(() => api.post(`/ops/projects/${id}/trigger-all`))
+  const chainName = cid => chains.find(c => c.id === cid)?.name || `#${cid}`
   const addCriterion = () => nc.description.trim() && act(async () => {
     const r = await api.post(`/ops/projects/${id}/criteria`, { ...nc, threshold: nc.threshold === '' ? null : Number(nc.threshold), unit: nc.unit || null })
     setNc(EMPTY_C); return r
@@ -61,11 +83,27 @@ export default function ProjectDetail() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
       <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <Link to="/projects" style={{ fontSize: 13 }}>← Projects</Link>
-        <h2 style={{ fontSize: 18 }}>{p.name}</h2>
+        <h2 style={{ fontSize: 18, display: 'block' }}>{p.name}</h2>
         <Badge status={p.status === 'active' ? 'active' : p.status === 'stopped' || p.status === 'archived' ? 'failed' : p.status}>{p.status}</Badge>
         <Badge status={p.eligibility_status === 'eligible' ? 'success' : p.eligibility_status === 'not_eligible' ? 'failed' : 'neutral'}>{p.eligibility_status || 'pending'}</Badge>
       </div>
       {msg && <div style={{ fontSize: 13, color: 'var(--text-dim)' }}>{msg}</div>}
+
+      <Card title="Basics" action={<Link to={`/tasks?project=${id}`} style={{ fontSize: 12.5, fontWeight: 600 }}>Manage tasks →</Link>}>
+        <input value={basics.name} onChange={e => setBasics({ ...basics, name: e.target.value })} placeholder="Project name" style={{ width: '100%', maxWidth: 420 }} />
+        <div style={{ fontSize: 12, color: 'var(--text-dim)', margin: '12px 0 6px' }}>Chains this project runs on</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {chains.map(c => (
+            <button key={c.id} type="button" className={basics.chain_ids.includes(c.id) ? 'primary sm' : 'sm'} onClick={() => toggleChain(c.id)}>{c.name}</button>
+          ))}
+          {chains.length === 0 && <span style={{ fontSize: 12.5, color: 'var(--text-faint)' }}>No chains configured.</span>}
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+          <button className="primary sm" onClick={saveBasics}>Save</button>
+          <button className="sm" onClick={runAll} disabled={!tasks.some(t => t.enabled)}>Run all enabled tasks once</button>
+          <span style={{ fontSize: 12, color: 'var(--text-faint)' }}>{tasks.filter(t => t.enabled).length}/{tasks.length} tasks enabled</span>
+        </div>
+      </Card>
 
       <Card title="Details and limits">
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
@@ -91,6 +129,31 @@ export default function ProjectDetail() {
           {(p.circuit_breaker_active || p.consecutive_failures > 0) && (
             <button className="sm" onClick={() => act(() => api.post(`/ops/projects/${id}/reset-circuit`))}>Reset</button>
           )}
+        </div>
+      </Card>
+
+      <Card title="Contracts">
+        {contracts.length === 0 ? <EmptyState icon="◇" title="No contracts" hint="Register claim or protocol contracts here. A label containing 'claim' puts the contract on the Claims scanner." /> : (
+          <div className="table-scroll"><table>
+            <thead><tr><th>Label</th><th>Chain</th><th>Address</th><th></th></tr></thead>
+            <tbody>
+              {contracts.map(k => (
+                <tr key={k.id}>
+                  <td>{k.label}</td><td>{chainName(k.chain_id)}</td>
+                  <td className="mono" style={{ fontSize: 12 }}>{k.address}</td>
+                  <td><button className="sm danger" onClick={async () => (await confirm({ title: 'Delete this contract?', confirmLabel: 'Delete', tone: 'danger' })) && act(() => api.delete(`/ops/contracts/${k.id}`))}>Delete</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table></div>
+        )}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 14 }}>
+          <select value={nk.chain_id} onChange={e => setNk({ ...nk, chain_id: e.target.value })}>
+            <option value="">Chain…</option>{chains.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <input placeholder="Label (e.g. airdrop claim)" value={nk.label} onChange={e => setNk({ ...nk, label: e.target.value })} style={{ minWidth: 180 }} />
+          <input className="mono" placeholder="0x…" value={nk.address} onChange={e => setNk({ ...nk, address: e.target.value })} style={{ flex: 1, minWidth: 260 }} />
+          <button className="primary sm" onClick={addContract}>Add</button>
         </div>
       </Card>
 

@@ -148,6 +148,22 @@ Phase 7 (website build-out for what moved off Telegram, §4/§6) is done in this
 - `frontend/src/pages/Proxies.jsx`, `Chains.jsx`, `Tasks.jsx` — replace
 - Patched in place by `apply_phase7_patches.py`: `api.js`, `App.jsx`, `Dashboard.jsx`, `Projects.jsx`, `Wallets.jsx`, `Settings.jsx`, `Snapshot.jsx`, `Sybil.jsx`, `vite.config.js`
 
+## 0.7b Phase 7 verification pass (applied together with Phase 9)
+Found by reviewing Phase 7 after it shipped; applied on top of the Phase 9 frontend.
+
+**Backend**
+- `backend/main.py`: the agent is now started with `start_agent()`. `stop_agent()` cancels `agent_task`, which only `start_agent()` sets, so every stop (Telegram, API, kill) silently did nothing to the loop. Telegram `agent_resume_all` restarts the agent if it is not running.
+- `core/queue_manager.py`: while the master seed is locked (every restart) HD wallets are not scheduled. Before, they failed to sign, hit cooldown (3 failures) and tripped project circuit breakers (5).
+- `core/worker_pool.py`: writes a `Log` row for every real success/failure (before, `Log` was only written in dry-run, so the live feed and Telegram daily counts were empty for real runs).
+- `api/routes/ws.py`: a closed page used to leak a polling task that queried the DB every 2s forever; new connections replayed logs from id 0. Now they start at the newest id; history comes from `GET /ws/recent-logs`. `project_id` added to log payloads.
+- `api/routes/ops.py` new endpoints: `/ops/transactions` (errors + explorer links), `/ops/claims/contracts`, `/ops/claims/scan` (uncached; the website uses the cached `/claims/scan`), project contracts (list/add/delete), `/ops/projects/{id}/trigger-all`, `/ops/persona/reroll-all`, `/ops/wallets/{id}/persona/reroll`, validated `PUT /ops/wallets/{id}/settings` (a blank field no longer becomes NULL -> 500), `/ops/system/agent/start|stop` (guarded: no double loop), `/ops/system/unlock` (unlock the seed from the website).
+- `api/routes/chains.py`: editing RPC URLs now drops the cached connection so it takes effect.
+- `faucet/manager.py`: `method: GET` faucets are sent as GET (they were always POST).
+- `requirements.txt`: `httpx[socks]` (socks5 proxies failed without it). **Run `pip install -r backend/requirements.txt` after pulling.**
+
+**Frontend (ported into the Phase 9 design system)**
+Wallets (search, blacklisted filter, tags, re-roll all personas), Manage dialog (validated save, re-roll), Logs (task activity + on-chain Transactions tab with explorer links), Claims (scan + watched contracts), Tasks (add-task form with per-type templates, Run all enabled once), Project detail (basics + chains, contracts, run-all, criteria, circuit breaker), System panel (start/stop agent, unlock seed), Faucets (per-wallet cooldown table via `FaucetStatus`), `api.js` (422 errors flattened to strings so React cannot crash on them; 401 returns you to login without a reload), live feed preloads recent history.
+
 ## 0.8 Phase 8 completion notes
 Phase 8 (Telegram group with topics: reports, errors, AI activity) is done.
 
@@ -203,14 +219,14 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
 - `project_priority` reduces only; it does not restore priority when the project recovers.
 - `SwapTask` uses `self.token_decimals` (18) for every input token, so token->token swaps of 6-decimal tokens (USDC/USDT) compute a wrong amount. Needs a decimals lookup before ERC20 swaps are trusted.
 **added in Phase 7, with recommendations**
-- ~~Claims page is dead~~ (Phase 9: read-only `/claims/scan` built). Still open: manual claim execution with confirm + dry-run. **Claims page is dead (old note)**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box. **note** no need for automatic claims, leave it as read only, as its. just a small improvement if needed.
+- ~~Claims page is dead~~ (Phase 9: read-only `/claims/scan` built). Still open: manual claim execution with confirm + dry-run. **Claims page is dead (old note)**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box.
 - **Project blacklist is unenforced**: `CompletedProjectsBlacklist` was only read by the removed discovery code. Recommend: either check it in project creation (route + Telegram wizard) or drop the table and command.
 - **`DRY_RUN_MODE` env is ignored**: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
 - **Emergency stop is in memory too** and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
-- **Faucets**: `method: GET` faucets are stored but every request is sent as POST; only `{address}` can be templated. `faucet/handlers/http_post.py` is unused and passes `proxies=`, which httpx >= 0.28 removed (delete it or use `client_proxy_kwargs`).
+- **Faucets**: ~~`method: GET` faucets sent as POST~~ (fixed in the verification pass); only `{address}` can be templated. `faucet/handlers/http_post.py` is unused and passes `proxies=`, which httpx >= 0.28 removed (delete it or use `client_proxy_kwargs`).
 - **Proxies cover faucet claims only.** RPC calls and the transactions themselves still come from the server IP. Recommend: if Sybil-hardening matters, route RPC per wallet through its proxy (needs a per-wallet web3 provider). `Wallet.proxy_id` is an unused duplicate of `Proxy.wallet_id`.
-- **Sessions**: login is not remembered across a page reload and the refresh-token endpoint is never used by the frontend. Recommend: use the refresh token (httpOnly cookie) so a reload or 30-minute expiry does not force a re-login, still keeping the access token out of localStorage.
-- **`Sybil.jsx` health/Sybil scores** read `health_score`/`sybil_risk_score`, which `WalletResponse` does not return, so the grid shows "—" and 0. Recommend adding both fields to `WalletResponse`.
+- **Sessions**: a reload no longer logs you out (Phase 9) but the refresh-token endpoint is still never used by the frontend (30 min expiry -> re-login). Recommend: use the refresh token (httpOnly cookie) so a reload or 30-minute expiry does not force a re-login, still keeping the access token out of localStorage.
+- ~~`Sybil.jsx` health/Sybil scores~~ (fixed: `WalletResponse` now returns both). They read `health_score`/`sybil_risk_score`, which `WalletResponse` does not return, so the grid shows "—" and 0. Recommend adding both fields to `WalletResponse`.
 - **`Claims`, `Sybil`, `Snapshot`, `Notifications`** still use the old fetch + inline-style code instead of the shared `api` client and components (redesign scope, Phase 9).
 - **Telegram wizard/`/projects` UI mismatch**: quick-add offers types (bridge, lending, dex) the wizard and prompts do not know.
 - Gas multipliers only go up; no decay (Phase 6). Wallets that reach `cooldown` are still not auto-recovered (now manually recoverable from the Manage panel). `project_priority` only reduces.
@@ -219,6 +235,15 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
 Report times are fixed (UTC) in code; no dashboard control. Recommend a Settings card with report schedule + a "send test message to each topic" button.
 Reports go to one group only; no per-topic mute. Telegram's own topic mute covers this for now.
 If a topic is deleted in Telegram, sends fall back to DMs until /group_setup reset is run. Recommend auto-detecting "thread not found" and re-cre
+
+**added in the Phase 7 verification pass / Phase 9**
+- **Claim EXECUTION is still not implemented anywhere** (Telegram `/claim_trigger` only prints instructions). Needs a TaskConfig-less transaction path (`Transaction.task_config_id` is NOT NULL). Recommend: manual claim with a confirm dialog + dry-run, never automatic.
+- **`Transaction.gas_cost_usd` is never written**, so every "Gas $" figure is 0. Needs gas_used x price at confirm time; on testnet the USD value is meaningless anyway, so consider showing native gas instead.
+- **Gas multiplier is applied twice**: `persona.gas_multiplier` in each task's build step AND `WalletSettings.gas_multiplier` in `BaseTask.execute`. Pick `WalletSettings` as the single source.
+- **Dry-run pauses automatic queue filling** (`agent.periodic_fill`); the Telegram text "will simulate" is inaccurate.
+- **Telegram maintenance window** (`system_maintenance`) was never enforced by the scheduler/queue.
+- **Master seed is memory-only**: consider auto-unlock at startup from `MASTER_PASSWORD` if you accept that trade-off (until then, unlock from Settings -> System controls after every restart).
+- **Two claim-scan endpoints** (`/claims/scan` cached, `/ops/claims/scan` uncached). Harmless; pick one when claim execution is built.
 
 ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
 - **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.
@@ -450,9 +475,9 @@ Ideas worth considering after the current phase, not committed to yet:
 - **Mainnet readiness pass (if ever needed)** — the project runs testnet-only for now, which is why §5.3's guardrails are set loose. If mainnet ever comes into scope later, everything in §5.3 needs a second pass first: tighter rate limits, a stricter agreement-score gate, and probably a required-human-approval mode as the default rather than an option.
 - **Rate-limit / cooldown visualization** — a single dashboard view showing every wallet's current cooldown/active-hours/daily-target state at a glance, since this data exists (`WalletSettings`, `TaskDailyProgress`) but is currently only visible per-wallet on request.
 - **Real-time AIs analysis & improvements & validation & reports/alerts and so on/etc**
+- **Faucet auto claims by AIs** - the faucet need automatic claim not always manual, whether by ai or program it to claim automatic after the cooldown finish
 - **and a lots of featurs thats i for forgot to mentions & your allowed to suggest for new features thats you find is useful for this project, including now or for the future roadmap, thank you**
 - if you get some too while lookimg/viewing this project you are good/allowed to add some too, if there useful just add them and explain, thats all.
-
 ---
 
 ## 9. Execution phases (proposed grouping — for reference once building starts)
@@ -464,7 +489,7 @@ Ideas worth considering after the current phase, not committed to yet:
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6. *built*
 6. **Phase 6 — New feature: AI-managed tasks/wallets** *built*
 7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
-8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *built*
+8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *not yet*
 9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *built*
 10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
 
@@ -476,4 +501,3 @@ This grouping is a suggestion, not a commitment — order can change based on wh
 - **Refresh token still unused;** token stays in localStorage (as before). Recommend an httpOnly refresh cookie so the access token can live in memory only.
 - **No automated frontend tests;** layouts were checked by screenshot at 390px and 1280px against mocked data only. Do a pass on a real phone against the live API.
 - **More-tab icon** on the phone bar is a thin dots glyph; swap for a clearer icon.
-- **No auto claims** airdrop-agent didn't want thats feature for now, leave it as read-only.

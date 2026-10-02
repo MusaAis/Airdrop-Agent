@@ -2,18 +2,23 @@
 Control-panel endpoints for everything that moved off Telegram (PLAN.md §4, Phase 7).
 All under /ops so they cannot collide with the /projects/{project_id} style routes.
 """
+import asyncio
 import random
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from web3 import Web3
 
 from backend.database import get_db
 from backend.security.auth import verify_token
-from backend.models import Wallet, WalletNonce
+from backend.models import (
+    Wallet, WalletNonce, WalletSettings, Transaction, Chain, Project, TaskConfig,
+    ProjectContract, AgentStatus, AgentSecret,
+)
 from backend.projects.manager import (
     get_project, update_project, get_task_config, update_task_config, list_task_configs,
 )
@@ -21,7 +26,10 @@ from backend.projects.criteria import (
     list_criteria, add_criterion, update_criterion, delete_criterion,
 )
 from backend.projects.circuit_breaker import reset_circuit
-from backend.wallet.manager import get_wallet
+from backend.projects.contracts import add_contract, list_contracts, delete_contract
+from backend.wallet.manager import get_wallet, get_wallet_settings, update_wallet_settings
+from backend.wallet.persona import assign_default_persona
+from backend.wallet.hd_generator import get_master_seed
 from backend.chains.manager import get_chain
 from backend.core.nonce_manager import release_nonce, sync_nonce_from_chain
 from backend.core.kill_switch import (
@@ -237,12 +245,16 @@ async def trigger_task(task_id: int, data: TriggerRequest, _user: dict = Depends
         wallet = await get_wallet(db, data.wallet_id)
         if not wallet or wallet.status != "active" or wallet.is_gas_wallet:
             raise HTTPException(400, "Wallet must exist, be active and not be a gas wallet")
+        if wallet.is_hd and get_master_seed() is None:
+            raise HTTPException(400, "Master seed is locked - unlock it in Settings > System first")
     else:
         rows = (await db.execute(
             select(Wallet).where(Wallet.status == "active", Wallet.is_gas_wallet == False)
         )).scalars().all()
+        if get_master_seed() is None:
+            rows = [w for w in rows if not w.is_hd]
         if not rows:
-            raise HTTPException(400, "No active wallets")
+            raise HTTPException(400, "No usable active wallets (is the master seed locked?)")
         wallet = random.choice(rows)
     from backend.agent import worker_pool
     await worker_pool.enqueue([{
@@ -346,6 +358,7 @@ def _system_state() -> dict:
         "emergency_stop": is_emergency_stop(),
         "ai_autonomy_paused": is_ai_autonomy_paused(),
         "agent_running": worker_pool.running,
+        "seed_loaded": get_master_seed() is not None,
     }
 
 
@@ -366,6 +379,13 @@ async def system_dry_run(data: DryRunRequest, _user: dict = Depends(verify_token
 @router.post("/system/emergency/clear")
 async def system_clear_emergency(_user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
     await deactivate_kill_switch(db)
+    from backend.agent import worker_pool
+    if not worker_pool.running:
+        # deactivate_kill_switch writes status="running" unconditionally
+        st = await db.get(AgentStatus, 1)
+        if st:
+            st.status = "stopped"
+            await db.commit()
     return {**_system_state(), "message": "Emergency stop cleared. Start the agent if it is stopped."}
 
 
@@ -373,3 +393,305 @@ async def system_clear_emergency(_user: dict = Depends(verify_token), db: AsyncS
 async def system_archive_logs(_user: dict = Depends(verify_token)):
     from backend.maintenance.log_archiver import run_all_maintenance
     return await run_all_maintenance()
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)   # DB stores naive UTC
+
+
+@router.post("/system/agent/start")
+async def system_agent_start(_user: dict = Depends(verify_token)):
+    """Guarded start (the plain /agent/start route has no already-running check,
+    so a double click would spawn a second agent loop and double the worker slots)."""
+    import backend.agent as agent_mod
+    if is_emergency_stop():
+        raise HTTPException(400, "Clear the emergency stop first")
+    t = agent_mod.agent_task
+    if agent_mod.worker_pool.running or (t is not None and not t.done()):
+        raise HTTPException(400, "Agent is already running (or still shutting down)")
+    agent_mod.start_agent()
+    return {**_system_state(), "message": "Agent starting"}
+
+
+@router.post("/system/agent/stop")
+async def system_agent_stop(_user: dict = Depends(verify_token)):
+    import backend.agent as agent_mod
+    agent_mod.stop_agent()
+    return {"message": "Stop requested - tasks already running finish first"}
+
+
+class UnlockRequest(BaseModel):
+    master_password: str
+
+
+@router.post("/system/unlock")
+async def system_unlock(data: UnlockRequest, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """Load the stored master seed into memory (same as Telegram /agent_unlock)."""
+    from backend.wallet.hd_generator import decrypt_seed, set_master_seed
+    from mnemonic import Mnemonic
+    entry = (await db.execute(select(AgentSecret).where(AgentSecret.key == "master_mnemonic"))).scalar_one_or_none()
+    if not entry:
+        raise HTTPException(404, "No stored seed. Set one first with POST /agent/set-seed")
+    try:
+        mnemonic = decrypt_seed(entry.value, data.master_password)
+    except Exception:
+        raise HTTPException(400, "Wrong master password")
+    # AES-CBC without a MAC: a wrong password can occasionally 'decrypt' to garbage
+    if not Mnemonic("english").check(mnemonic):
+        raise HTTPException(400, "Wrong master password")
+    set_master_seed(mnemonic)
+    return {**_system_state(), "message": "Seed unlocked"}
+
+
+# ═══════════════════════ wallet settings (validated) ═══════════════════════
+_DIST = {"weighted_low", "weighted_high", "uniform"}
+_NULLABLE = {"amount_min_override", "amount_max_override", "active_hour_start", "active_hour_end"}
+_DEFAULTS = {"start_offset_max_mins": 45, "sleep_min_mins": 2, "sleep_max_mins": 8,
+             "gas_multiplier": 1.0, "daily_tx_min": 2, "daily_tx_max": 7}
+
+
+class SettingsIn(BaseModel):
+    amount_min_override: Optional[float] = None
+    amount_max_override: Optional[float] = None
+    amount_distribution: Optional[str] = None
+    amount_vary_daily: Optional[bool] = None
+    active_hour_start: Optional[int] = None
+    active_hour_end: Optional[int] = None
+    start_offset_max_mins: Optional[int] = None
+    sleep_min_mins: Optional[int] = None
+    sleep_max_mins: Optional[int] = None
+    gas_multiplier: Optional[float] = None
+    bidirectional_default: Optional[bool] = None
+    daily_tx_min: Optional[int] = None
+    daily_tx_max: Optional[int] = None
+
+
+@router.put("/wallets/{wallet_id}/settings")
+async def save_wallet_settings(wallet_id: int, data: SettingsIn, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """Validated replacement for PUT /wallets/{id}/settings. That route let a blank
+    field write NULL into NOT NULL columns (500) and accepted any value."""
+    if not await get_wallet(db, wallet_id):
+        raise HTTPException(404, "Wallet not found")
+    cur = await get_wallet_settings(db, wallet_id)
+    # explicit null only clears the nullable columns; required ones keep their value
+    fields = {k: v for k, v in data.model_dump(exclude_unset=True).items() if v is not None or k in _NULLABLE}
+
+    def val(k):
+        v = fields[k] if k in fields else (getattr(cur, k, None) if cur else None)
+        return _DEFAULTS.get(k) if v is None and k in _DEFAULTS else v
+
+    a_min, a_max = val("amount_min_override"), val("amount_max_override")
+    hs, he = val("active_hour_start"), val("active_hour_end")
+    smin, smax = val("sleep_min_mins"), val("sleep_max_mins")
+    dmin, dmax = val("daily_tx_min"), val("daily_tx_max")
+    off, gas = val("start_offset_max_mins"), val("gas_multiplier")
+    dist = val("amount_distribution")
+
+    if (a_min is not None and a_min <= 0) or (a_max is not None and a_max <= 0):
+        raise HTTPException(400, "amount overrides must be > 0")
+    if a_min is not None and a_max is not None and a_max < a_min:
+        raise HTTPException(400, "amount max override must be >= min override")
+    if (hs is None) != (he is None):
+        raise HTTPException(400, "set both active-hour fields, or leave both empty")
+    if hs is not None and not (0 <= hs <= 23 and 0 <= he <= 23):
+        raise HTTPException(400, "active hours must be 0-23 (UTC)")
+    if not (1 <= smin <= smax <= 1440):
+        raise HTTPException(400, "sleep must satisfy 1 <= min <= max <= 1440 minutes")
+    if not (1 <= dmin <= dmax <= 50):
+        raise HTTPException(400, "daily tx must satisfy 1 <= min <= max <= 50")
+    if not (0 <= off <= 720):
+        raise HTTPException(400, "start offset must be 0-720 minutes")
+    if not (0.5 <= gas <= 3.0):
+        raise HTTPException(400, "gas multiplier must be between 0.5 and 3.0")
+    if dist is not None and dist not in _DIST:
+        raise HTTPException(400, f"amount_distribution must be one of {sorted(_DIST)}")
+
+    fields["updated_at"] = _now()
+    await update_wallet_settings(db, wallet_id, **fields)
+    return {"message": "Settings saved"}
+
+
+async def _apply_persona(db: AsyncSession, w: Wallet) -> dict:
+    """New random persona (same generator as wallet creation). Not committed."""
+    persona = assign_default_persona()
+    w.persona = persona
+    ws = await get_wallet_settings(db, w.id)
+    if ws is None:
+        ws = WalletSettings(wallet_id=w.id)
+        db.add(ws)
+    for k, v in persona.items():
+        if hasattr(ws, k):
+            setattr(ws, k, v)
+    ws.updated_at = _now()
+    return persona
+
+
+@router.post("/wallets/{wallet_id}/persona/reroll")
+async def reroll_persona(wallet_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    w = await get_wallet(db, wallet_id)
+    if not w:
+        raise HTTPException(404, "Wallet not found")
+    await _apply_persona(db, w)
+    await db.commit()
+    return {"message": f"Wallet #{wallet_id} has a new random persona"}
+
+
+@router.post("/persona/reroll-all")
+async def reroll_all_personas(_user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """The website replacement for Telegram config_reset. Resetting every wallet to
+    the SAME defaults would make them behave identically (a Sybil signal), so this
+    gives each wallet its own fresh random persona instead."""
+    rows = (await db.execute(
+        select(Wallet).where(Wallet.is_gas_wallet == False, Wallet.status != "archived")
+    )).scalars().all()
+    for w in rows:
+        await _apply_persona(db, w)
+    await db.commit()
+    return {"message": f"Re-rolled personas for {len(rows)} wallet(s)"}
+
+
+# ═══════════════════════════ project contracts ═══════════════════════════
+class ContractIn(BaseModel):
+    chain_id: int            # internal chain DB id (same id the Chains page shows as "DB id")
+    label: str
+    address: str
+
+
+def _contract(c: ProjectContract) -> dict:
+    return {"id": c.id, "project_id": c.project_id, "chain_id": c.chain_id, "label": c.label, "address": c.address}
+
+
+@router.get("/projects/{project_id}/contracts")
+async def get_contracts(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    return [_contract(c) for c in await list_contracts(db, project_id)]
+
+
+@router.post("/projects/{project_id}/contracts")
+async def create_contract(project_id: int, data: ContractIn, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    if not await get_project(db, project_id):
+        raise HTTPException(404, "Project not found")
+    if not await get_chain(db, data.chain_id):
+        raise HTTPException(400, "Chain not found")
+    label = data.label.strip()
+    if not label or len(label) > 60:
+        raise HTTPException(400, "label is required (max 60 characters)")
+    if not Web3.is_address(data.address.strip()):
+        raise HTTPException(400, "address is not a valid EVM address (or its checksum is wrong)")
+    addr = Web3.to_checksum_address(data.address.strip())
+    dup = [c for c in await list_contracts(db, project_id) if c.chain_id == data.chain_id and c.address.lower() == addr.lower()]
+    if dup:
+        raise HTTPException(400, "That contract is already registered for this project on this chain")
+    return _contract(await add_contract(db, project_id=project_id, chain_id=data.chain_id, label=label, address=addr))
+
+
+@router.delete("/contracts/{contract_id}")
+async def remove_contract(contract_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    if not await delete_contract(db, contract_id):
+        raise HTTPException(404, "Contract not found")
+    return {"message": "Deleted"}
+
+
+# ═══════════════════════════ run all tasks of a project ═══════════════════════════
+@router.post("/projects/{project_id}/trigger-all")
+async def trigger_project_tasks(project_id: int, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """Queue one run of every ENABLED task, each on a different wallet where possible
+    (the queue drops a second item for the same wallet+chain, so picking wallets
+    at random could silently lose tasks)."""
+    if is_emergency_stop():
+        raise HTTPException(400, "Emergency stop is active")
+    project = await get_project(db, project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+    if project.status == "archived":
+        raise HTTPException(400, "Project is archived")
+    tasks = [t for t in await list_task_configs(db, project_id) if t.enabled]
+    if not tasks:
+        raise HTTPException(400, "No enabled tasks")
+    wallets = (await db.execute(
+        select(Wallet).where(Wallet.status == "active", Wallet.is_gas_wallet == False)
+    )).scalars().all()
+    if get_master_seed() is None:
+        wallets = [w for w in wallets if not w.is_hd]
+    if not wallets:
+        raise HTTPException(400, "No usable active wallets (is the master seed locked?)")
+    random.shuffle(wallets)
+    used, items, skipped = set(), [], 0
+    for t in tasks:
+        chain = await get_chain(db, t.chain_id)
+        if not chain or not chain.enabled:
+            skipped += 1
+            continue
+        w = next((x for x in wallets if (x.id, chain.id) not in used), None)
+        if w is None:
+            skipped += 1
+            continue
+        used.add((w.id, chain.id))
+        items.append({"wallet": w, "task_config": t, "project": project, "chain": chain, "priority": project.priority})
+    if not items:
+        raise HTTPException(400, "Nothing could be queued (disabled chains or not enough wallets)")
+    from backend.agent import worker_pool
+    await worker_pool.enqueue(items)
+    mode = "DRY RUN - simulate only" if is_dry_run() else "live"
+    note = f", {skipped} skipped (disabled chain / no free wallet)" if skipped else ""
+    return {"message": f"Queued {len(items)} task(s) [{mode}]{note}"}
+
+
+# ═══════════════════════════ transactions ═══════════════════════════
+@router.get("/transactions")
+async def list_transactions(
+    status: Optional[str] = None, wallet_id: Optional[int] = None, project_id: Optional[int] = None,
+    hours: int = Query(168, ge=1, le=24 * 90), limit: int = Query(100, ge=1, le=500),
+    _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db),
+):
+    """On-chain transaction list with errors and explorer links (replaces the
+    Telegram tx_status / tx_failed commands)."""
+    stmt = (
+        select(Transaction, Wallet.address, Chain.name, Chain.explorer_url, TaskConfig.task_type, Project.name)
+        .join(Wallet, Transaction.wallet_id == Wallet.id)
+        .join(Chain, Transaction.chain_id == Chain.id)
+        .outerjoin(TaskConfig, Transaction.task_config_id == TaskConfig.id)
+        .outerjoin(Project, TaskConfig.project_id == Project.id)
+        .where(Transaction.created_at >= _now() - timedelta(hours=hours))
+        .order_by(Transaction.id.desc()).limit(limit)
+    )
+    if status:
+        stmt = stmt.where(Transaction.status == status)
+    if wallet_id:
+        stmt = stmt.where(Transaction.wallet_id == wallet_id)
+    if project_id:
+        stmt = stmt.where(TaskConfig.project_id == project_id)
+    out = []
+    for tx, addr, chain_name, explorer, task_type, proj_name in (await db.execute(stmt)).all():
+        h = tx.tx_hash or ""
+        if h and not h.startswith("0x"):
+            h = "0x" + h
+        out.append({
+            "id": tx.id, "wallet_id": tx.wallet_id, "wallet": addr, "chain": chain_name,
+            "project": proj_name, "task_type": task_type, "status": tx.status,
+            "tx_hash": h, "explorer_url": f"{explorer.rstrip('/')}/tx/{h}" if explorer and h else None,
+            "gas_used": tx.gas_used, "error": tx.error_message,
+            "created_at": tx.created_at.isoformat() if tx.created_at else None,
+        })
+    return out
+
+
+# ═══════════════════════════ claims (scan only - claiming stays manual) ═══════════════════════════
+@router.get("/claims/contracts")
+async def claim_contracts(_user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    """Contracts the scanner will check: any project contract whose label contains 'claim'."""
+    rows = (await db.execute(
+        select(ProjectContract, Project.name, Chain.name)
+        .join(Project, ProjectContract.project_id == Project.id)
+        .join(Chain, ProjectContract.chain_id == Chain.id)
+        .where(ProjectContract.label.ilike("%claim%"))
+    )).all()
+    return [{**_contract(c), "project": pn, "chain": cn} for c, pn, cn in rows]
+
+
+@router.get("/claims/scan")
+async def claims_scan(_user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
+    from backend.claims.manager import scan_claimable_airdrops
+    try:
+        return await asyncio.wait_for(scan_claimable_airdrops(db), timeout=150)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Scan took longer than 150s - try again or reduce the number of wallets/contracts")

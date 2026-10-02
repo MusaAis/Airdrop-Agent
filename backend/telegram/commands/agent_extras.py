@@ -29,6 +29,9 @@ async def handle_agent_pause_all(user_id, db, confirmation=None):
 async def handle_agent_resume_all(user_id, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     await deactivate_kill_switch(db)
+    if not worker_pool.running:
+        start_agent()
+        return "▶️ Farming resumed and the agent was restarted."
     return "▶️ Farming resumed. Queue will refill on next cycle (30s)."
 
 

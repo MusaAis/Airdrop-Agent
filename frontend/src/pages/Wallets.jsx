@@ -7,7 +7,7 @@ import WalletManage from '../components/WalletManage'
 import { Card, Badge, PageHeader, StatTile, EmptyState, DataTable, Segmented, Field } from '../components/ui'
 import { shortAddr } from '../lib/format'
 
-const FILTERS = ['all', 'active', 'paused', 'cooldown', 'archived']
+const FILTERS = ['all', 'active', 'paused', 'cooldown', 'blacklisted', 'archived']
 
 export default function Wallets() {
   const toast = useToast()
@@ -20,21 +20,33 @@ export default function Wallets() {
   const [busy, setBusy] = useState(false)
   const [managing, setManaging] = useState(null)
   const [filter, setFilter] = useState('all')
+  const [q, setQ] = useState('')
 
   const run = async (fn, ok) => {
     setBusy(true)
     try { await fn(); if (ok) toast.success(ok); await reload() }
-    catch (e) { toast.error(apiError(e)) }
+    catch (e) { toast.error(e?.response ? apiError(e) : (e?.message || 'Request failed.')) }
     finally { setBusy(false) }
   }
 
   const generate = () => {
-    const n = Math.max(1, Math.min(100, Number(count) || 1))
-    return run(() => api.post('/wallets/generate', { count: n, start_index: wallets.length }), `Generated ${n} wallet(s).`)
+    const n = Math.max(1, Math.min(50, Number(count) || 1))
+    return run(
+      () => api.post('/wallets/generate', { count: n, start_index: wallets.length }).catch(e => {
+        const d = e?.response?.data?.detail
+        throw d ? e : new Error('Could not generate wallets. Is the master seed set and unlocked? (Settings → System controls)')
+      }),
+      `Generated ${n} wallet(s).`,
+    )
+  }
+
+  const rerollAll = async () => {
+    if (await confirm({ title: 'Re-roll every persona?', message: 'Gives every non-archived, non-gas wallet a NEW random persona and overwrites their behaviour settings (hours, sleep, gas multiplier, daily range).', confirmLabel: 'Re-roll all' }))
+      run(() => api.post('/ops/persona/reroll-all').then(r => { toast.success(r.data.message); return r }))
   }
 
   const importWallet = async () => {
-    const key = privKey.trim()
+    const key = privKey.trim().replace(/^0x/, '')
     if (!key) return toast.error('Paste a private key first.')
     const ok = await confirm({
       title: 'Send a raw private key?',
@@ -61,7 +73,10 @@ export default function Wallets() {
     return c
   }, [wallets])
 
-  const visible = filter === 'all' ? wallets : wallets.filter(w => w.status === filter)
+  const visible = useMemo(() => wallets.filter(w =>
+    (filter === 'all' || w.status === filter) &&
+    (!q || `${w.id} ${w.address} ${(w.tags || []).join(' ')}`.toLowerCase().includes(q.toLowerCase())),
+  ), [wallets, filter, q])
 
   const columns = [
     { key: 'id', label: 'ID', render: w => <span className="mono muted">{w.id}</span> },
@@ -74,7 +89,16 @@ export default function Wallets() {
         </span>
       ),
     },
-    { key: 'status', label: 'Status', render: w => <Badge status={w.status}>{w.status}</Badge> },
+    { key: 'tags', label: 'Tags', render: w => <span className="muted" style={{ fontSize: 12 }}>{(w.tags || []).join(', ') || '—'}</span> },
+    {
+      key: 'status', label: 'Status',
+      render: w => (
+        <span className="row" style={{ gap: 6, justifyContent: 'flex-end' }}>
+          <Badge status={w.status}>{w.status}</Badge>
+          {w.failure_count > 0 && <span className="faint" style={{ fontSize: 11 }}>{w.failure_count} fail</span>}
+        </span>
+      ),
+    },
     { key: 'health', label: 'Health', num: true, render: w => <span className="mono">{w.health_score ?? '—'}</span> },
     {
       key: 'sybil', label: 'Sybil', num: true,
@@ -108,8 +132,9 @@ export default function Wallets() {
         <Card title="Generate HD wallets">
           <p className="hint" style={{ marginBottom: 14 }}>Derives new wallets from your configured seed phrase. Safe and recommended.</p>
           <div className="row">
-            <input type="number" value={count} min={1} max={100} onChange={e => setCount(e.target.value)} aria-label="How many wallets" />
+            <input type="number" value={count} min={1} max={50} onChange={e => setCount(e.target.value)} aria-label="How many wallets" />
             <button className="primary" onClick={generate} disabled={busy}>Generate</button>
+            <button className="ghost sm" onClick={rerollAll} disabled={busy} title="Fresh random behaviour settings for every wallet">Re-roll all personas</button>
           </div>
         </Card>
 
@@ -126,9 +151,10 @@ export default function Wallets() {
       </div>
 
       <Card title="All wallets" action={<Segmented value={filter} onChange={setFilter} options={FILTERS} />}>
+        <input placeholder="Search id, address or tag…" value={q} onChange={e => setQ(e.target.value)} style={{ width: '100%', marginBottom: 14 }} />
         <DataTable
           columns={columns} rows={visible} loading={loading}
-          empty={<EmptyState icon="◇" title={wallets.length ? 'No wallets in this view' : 'No wallets yet'} hint={wallets.length ? 'Try another filter.' : 'Generate HD wallets or import a private key to get started.'} />}
+          empty={<EmptyState icon="◇" title={wallets.length ? 'No wallets match' : 'No wallets yet'} hint={wallets.length ? 'Change the search or status filter.' : 'Generate HD wallets or import a private key to get started.'} />}
         />
       </Card>
 

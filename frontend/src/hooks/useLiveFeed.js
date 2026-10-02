@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import api from '../api'
 
 function wsBase() {
   const env = import.meta.env.VITE_BACKEND_WS_URL
@@ -14,12 +15,33 @@ function wsBase() {
  *   status     agent status on connect       -> `heartbeat`
  *   heartbeat  worker/memory pulse           -> `heartbeat`
  * Heartbeats are NOT added to `events`, so the feed only shows real activity.
+ * Recent history (default 50 rows) is loaded once from /ws/recent-logs, because the socket
+ * itself only streams rows created after you connect.
  */
-export default function useLiveFeed({ max = 150 } = {}) {
+export default function useLiveFeed({ max = 150, history = 50 } = {}) {
   const [connected, setConnected] = useState(false)
   const [events, setEvents] = useState([])
   const [heartbeat, setHeartbeat] = useState(null)
   const seen = useRef(new Set())
+
+  // The socket only streams NEW rows (it starts at the newest id), so load recent history once.
+  useEffect(() => {
+    if (!history) return
+    let alive = true
+    api.get('/ws/recent-logs', { params: { limit: history } })
+      .then(r => {
+        if (!alive || !Array.isArray(r.data)) return
+        const rows = [...r.data].reverse() // endpoint is oldest -> newest; the feed is newest first
+        setEvents(prev => {
+          const have = new Set(prev.map(e => e.id))
+          const fresh = rows.filter(e => !have.has(e.id))
+          fresh.forEach(e => e.id != null && seen.current.add(e.id))
+          return [...prev, ...fresh].slice(0, max)
+        })
+      })
+      .catch(() => {})
+    return () => { alive = false }
+  }, [history, max])
 
   useEffect(() => {
     let ws = null

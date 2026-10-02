@@ -16,7 +16,7 @@ logger = logging.getLogger("airdrop.faucet")
 
 async def _make_faucet_request(
     url: str, wallet_address: str, body_template: dict, fallback_urls: List[str] = None,
-    wallet_id: Optional[int] = None,
+    wallet_id: Optional[int] = None, method: str = "POST",
 ) -> dict:
     """Make real HTTP POST to faucet, try fallback URLs on failure.
 
@@ -35,14 +35,22 @@ async def _make_faucet_request(
     for try_url in urls_to_try:
         try:
             async with httpx.AsyncClient(timeout=30, **proxy_kwargs) as client:
-                resp = await client.post(
-                    try_url,
-                    content=body,
-                    headers={
-                        "Content-Type": "application/json",
-                        "User-Agent": "AirdropAgent/1.0",
-                    },
-                )
+                if (method or "POST").upper() == "GET":
+                    params = {k: str(v).replace("{address}", wallet_address) for k, v in (body_template or {}).items()}
+                    resp = await client.get(
+                        try_url.replace("{address}", wallet_address),
+                        params=params,
+                        headers={"User-Agent": "AirdropAgent/1.0"},
+                    )
+                else:
+                    resp = await client.post(
+                        try_url,
+                        content=body,
+                        headers={
+                            "Content-Type": "application/json",
+                            "User-Agent": "AirdropAgent/1.0",
+                        },
+                    )
                 if resp.status_code in (200, 201, 202):
                     logger.info(f"Faucet success: {try_url} → {resp.status_code}")
                     return {"success": True, "url": try_url, "response": resp.text[:300]}
@@ -111,7 +119,8 @@ async def _do_request(wallet: Wallet, chain: Chain, db: AsyncSession) -> List[di
         body_template = faucet.body_template or {"address": "{address}"}
         fallback_urls = faucet.fallback_urls if isinstance(faucet.fallback_urls, list) else []
         request_result = await _make_faucet_request(
-            faucet.url, wallet.address, body_template, fallback_urls, wallet_id=wallet.id
+            faucet.url, wallet.address, body_template, fallback_urls, wallet_id=wallet.id,
+            method=faucet.method,
         )
 
         # Get tokens this faucet provides

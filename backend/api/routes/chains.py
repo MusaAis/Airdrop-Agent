@@ -71,9 +71,14 @@ async def get_chain_detail(chain_db_id: int, _user: dict = Depends(verify_token)
 
 @router.put("/{chain_db_id}")
 async def update_chain_route(chain_db_id: int, data: ChainUpdate, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
-    chain = await update_chain(db, chain_db_id, **data.model_dump(exclude_unset=True))
+    fields = data.model_dump(exclude_unset=True)
+    chain = await update_chain(db, chain_db_id, **fields)
     if not chain:
         raise HTTPException(status_code=404, detail="Chain not found")
+    if "rpc_urls" in fields:
+        # drop the cached web3 connection so edited RPC URLs take effect immediately
+        from backend.chains.rpc_pool import _rpc_connections
+        _rpc_connections.pop(chain_db_id, None)
     return chain
 
 @router.delete("/{chain_db_id}")

@@ -63,8 +63,8 @@ async def startup():
     start_scheduler()
 
     # Start the main agent loop as a background task
-    from backend.agent import agent_loop
-    asyncio.create_task(agent_loop())
+    from backend.agent import start_agent
+    start_agent()
 
     # Start Telegram bot if configured
     from backend.config import TELEGRAM_BOT_TOKEN

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import api from '../api'
 import Spinner from '../components/Spinner'
+import FaucetStatus from '../components/FaucetStatus'
 import { useConfirm } from '../components/Confirm'
 import { Card, Badge, EmptyState, SkeletonRows } from '../components/ui'
 
@@ -219,6 +220,7 @@ export default function Faucets({ token }) {
             ))}
           </div>
         )}
+        <FaucetStatus walletId={claimWalletId} chains={chains} refreshKey={claimResult} />
       </Card>
 
       <Card

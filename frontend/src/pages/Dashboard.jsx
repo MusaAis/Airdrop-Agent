@@ -20,7 +20,7 @@ export default function Dashboard() {
   return (
     <div className="stack">
       <div className="grid-stats">
-        <Card><StatTile label="Agent" value={s.status || '—'} tone={isRunning ? 'signal' : 'amber'} sub={isRunning ? 'Operating normally' : 'Not actively running'} /></Card>
+        <Card><StatTile label="Agent" value={s.status || '—'} tone={s.emergency_stop ? 'rose' : isRunning ? 'signal' : 'amber'} sub={s.emergency_stop ? 'EMERGENCY STOP active' : s.dry_run ? 'Dry-run ON' : isRunning ? 'Operating normally' : 'Not actively running'} /></Card>
         <Card>
           <StatTile label="Worker slots" value={`${slotsActive}/${slotsMax}`} tone="violet" sub="Active / max capacity" />
           <div style={{ marginTop: 10 }}><Meter percent={slotsMax ? (slotsActive / slotsMax) * 100 : 0} tone="var(--violet)" /></div>

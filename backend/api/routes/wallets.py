@@ -50,6 +50,7 @@ class WalletResponse(BaseModel):
     tags: Optional[list] = None
     persona: Optional[dict] = None
     failure_count: int = 0
+    name: Optional[str] = None
     health_score: int = 100
     sybil_risk_score: int = 0
 
