@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
-import api from '../api'
+import api, { API_BASE } from '../api'
 
 function wsBase() {
+  // 1) explicit override, 2) derived from the REST base URL (https -> wss), 3) same origin
+  //    (works behind the Vite dev proxy or a reverse proxy that serves both).
   const env = import.meta.env.VITE_BACKEND_WS_URL
   if (env) return env.replace(/\/$/, '')
-  // same origin: works behind the Vite dev proxy (/ws) and behind a reverse proxy in production
+  if (API_BASE && /^https?:\/\//.test(API_BASE)) return API_BASE.replace(/^http/, 'ws').replace(/\/$/, '')
   return `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
 }
 

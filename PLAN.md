@@ -245,6 +245,11 @@ If a topic is deleted in Telegram, sends fall back to DMs until /group_setup res
 - **Master seed is memory-only**: consider auto-unlock at startup from `MASTER_PASSWORD` if you accept that trade-off (until then, unlock from Settings -> System controls after every restart).
 - **Two claim-scan endpoints** (`/claims/scan` cached, `/ops/claims/scan` uncached). Harmless; pick one when claim execution is built.
 
+**added after Phase 9 went live**
+- **Website seed unlock** rejected a correct password: it required a perfect BIP39 checksum, stricter than Telegram's unlock and than derivation itself. It now proves the password by re-deriving an existing HD wallet's address (falls back to a word-count sanity check when no HD wallet exists).
+- **`derive_hd_wallet` had dead code** (`HDWalletMnemonic("english")`) that raises on eth-account >= 0.13; removed, so a dependency upgrade cannot break wallet derivation. Consider pinning `eth-account` in `requirements.txt`.
+- **Live feed URL**: if `VITE_BACKEND_WS_URL` is not set it is derived from `VITE_API_BASE_URL` (https -> wss) instead of assuming the Vercel origin. Error toasts now include the HTTP status, and the Dashboard Overview card shows the real reason it could not load.
+
 ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
 - **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.
 - **Audit log of manual actions** (who pressed Recover/Run now/Blacklist, when). The AI already has `ai_actions`; manual changes have none. Cheap to add and valuable once more than one person uses the panel.
@@ -475,7 +480,6 @@ Ideas worth considering after the current phase, not committed to yet:
 - **Mainnet readiness pass (if ever needed)** — the project runs testnet-only for now, which is why §5.3's guardrails are set loose. If mainnet ever comes into scope later, everything in §5.3 needs a second pass first: tighter rate limits, a stricter agreement-score gate, and probably a required-human-approval mode as the default rather than an option.
 - **Rate-limit / cooldown visualization** — a single dashboard view showing every wallet's current cooldown/active-hours/daily-target state at a glance, since this data exists (`WalletSettings`, `TaskDailyProgress`) but is currently only visible per-wallet on request.
 - **Real-time AIs analysis & improvements & validation & reports/alerts and so on/etc**
-- **Faucet auto claims by AIs** - the faucet need automatic claim not always manual, whether by ai or program it to claim automatic after the cooldown finish
 - **and a lots of featurs thats i for forgot to mentions & your allowed to suggest for new features thats you find is useful for this project, including now or for the future roadmap, thank you**
 - if you get some too while lookimg/viewing this project you are good/allowed to add some too, if there useful just add them and explain, thats all.
 ---

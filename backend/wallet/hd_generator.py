@@ -2,8 +2,6 @@ from eth_account import Account
 Account.enable_unaudited_hdwallet_features()
 import logging
 from typing import List, Optional
-from mnemonic import Mnemonic
-from eth_account.hdaccount import Mnemonic as HDWalletMnemonic
 from eth_account import Account
 
 logger = logging.getLogger("airdrop.hd")
@@ -23,14 +21,10 @@ def derive_hd_wallet(index: int, mnemonic: Optional[str] = None) -> dict:
     if not phrase:
         raise ValueError("No master seed set")
 
-    # Generate seed from mnemonic
-    mnemo = Mnemonic("english")
-    seed = mnemo.to_seed(phrase)
-
-    # Use eth-account HD wallet
-    hd_mnemonic = HDWalletMnemonic("english")
-    master_key = hd_mnemonic.to_seed(phrase)   # same as seed
-    # Derive the account at m/44'/60'/0'/0/index
+    # Derive the account at m/44'/60'/0'/0/index.
+    # (The old code also built an unused Mnemonic/seed here; `HDWalletMnemonic("english")`
+    # raises on eth-account >= 0.13, which would have broken every derivation after a
+    # dependency upgrade. Account.from_mnemonic does all the work.)
     path = f"m/44'/60'/0'/0/{index}"
     account = Account.from_mnemonic(phrase, account_path=path)
     return {

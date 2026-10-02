@@ -5,8 +5,10 @@ export function apiError(e, fallback = 'Request failed.') {
   const d = e?.response?.data?.detail
   if (typeof d === 'string') return d
   if (Array.isArray(d)) return d.map(x => x?.msg || String(x)).join('; ')
-  if (e?.message === 'Network Error') return 'Cannot reach the server.'
-  return fallback
+  if (e?.message === 'Network Error') return 'Cannot reach the server (network or CORS error).'
+  if (e?.code === 'ECONNABORTED') return 'The server took too long to answer (timeout).'
+  const status = e?.response?.status
+  return status ? `${String(fallback).replace(/\.$/, '')} (HTTP ${status})` : fallback
 }
 
 /**

@@ -426,9 +426,17 @@ class UnlockRequest(BaseModel):
 
 @router.post("/system/unlock")
 async def system_unlock(data: UnlockRequest, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
-    """Load the stored master seed into memory (same as Telegram /agent_unlock)."""
-    from backend.wallet.hd_generator import decrypt_seed, set_master_seed
-    from mnemonic import Mnemonic
+    """Load the stored master seed into memory (same as Telegram /agent_unlock).
+
+    AES-CBC has no MAC, so a WRONG password can still "decrypt" to garbage without raising.
+    The check therefore has to be done on the result, but it must not be stricter than what
+    the rest of the system accepts: the seed is used as-is by derive_hd_wallet, and Telegram's
+    unlock takes any decrypted text. An earlier version required a perfect BIP39 checksum,
+    which rejected a correct password whenever the stored phrase had stray spacing or casing.
+    Best proof is an existing HD wallet: if the candidate seed re-derives its address, the
+    password is right.
+    """
+    from backend.wallet.hd_generator import decrypt_seed, derive_hd_wallet, set_master_seed
     entry = (await db.execute(select(AgentSecret).where(AgentSecret.key == "master_mnemonic"))).scalar_one_or_none()
     if not entry:
         raise HTTPException(404, "No stored seed. Set one first with POST /agent/set-seed")
@@ -436,9 +444,26 @@ async def system_unlock(data: UnlockRequest, _user: dict = Depends(verify_token)
         mnemonic = decrypt_seed(entry.value, data.master_password)
     except Exception:
         raise HTTPException(400, "Wrong master password")
-    # AES-CBC without a MAC: a wrong password can occasionally 'decrypt' to garbage
-    if not Mnemonic("english").check(mnemonic):
+
+    words = mnemonic.split()
+    looks_like_phrase = (
+        len(words) in (12, 15, 18, 21, 24)
+        and all(w.isascii() and w.isalpha() for w in words)
+    )
+    if not looks_like_phrase:
         raise HTTPException(400, "Wrong master password")
+
+    hd = (await db.execute(
+        select(Wallet).where(Wallet.is_hd == True, Wallet.hd_index.is_not(None)).order_by(Wallet.id).limit(1)
+    )).scalar_one_or_none()
+    if hd is not None:
+        try:
+            ok = derive_hd_wallet(hd.hd_index, mnemonic)["address"].lower() == (hd.address or "").lower()
+        except Exception:
+            ok = False
+        if not ok:
+            raise HTTPException(400, "Wrong master password (the decrypted seed does not match your existing wallets)")
+
     set_master_seed(mnemonic)
     return {**_system_state(), "message": "Seed unlocked"}
 

@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react'
+import React from 'react'
 import api from '../api'
+import useApi from '../hooks/useApi'
 import { Card, Badge, EmptyState, StatTile, DataTable } from './ui'
 
 const fmt = n => (n == null ? '—' : Number(n).toLocaleString())
@@ -25,17 +26,15 @@ function ago(iso) {
 }
 
 export default function StatsOverview() {
-  const [d, setD] = useState(null)
-  const [err, setErr] = useState(false)
+  const { data: d, error: err, reload } = useApi(() => api.get('/stats/overview').then(r => r.data), [], { interval: 60000 })
 
-  useEffect(() => {
-    const load = () => api.get('/stats/overview').then(r => { setD(r.data); setErr(false) }).catch(() => setErr(true))
-    load()
-    const t = setInterval(load, 60000)
-    return () => clearInterval(t)
-  }, [])
-
-  if (err && !d) return <Card title="Overview"><p className="error">Could not load stats.</p></Card>
+  if (err && !d) {
+    return (
+      <Card title="Overview" action={<button className="sm" onClick={reload}>Retry</button>}>
+        <p className="error">Could not load stats: {err}</p>
+      </Card>
+    )
+  }
   if (!d) return <Card title="Overview"><div className="skeleton" style={{ height: 70, borderRadius: 10 }} /></Card>
 
   const t24 = d.transactions.last_24h, t7 = d.transactions.last_7d, all = d.transactions.all_time
