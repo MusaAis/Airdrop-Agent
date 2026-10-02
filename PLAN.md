@@ -148,7 +148,35 @@ Phase 7 (website build-out for what moved off Telegram, §4/§6) is done in this
 - `frontend/src/pages/Proxies.jsx`, `Chains.jsx`, `Tasks.jsx` — replace
 - Patched in place by `apply_phase7_patches.py`: `api.js`, `App.jsx`, `Dashboard.jsx`, `Projects.jsx`, `Wallets.jsx`, `Settings.jsx`, `Snapshot.jsx`, `Sybil.jsx`, `vite.config.js`
 
-**next up:** phase 8
+## 0.8 Phase 8 completion notes
+Phase 8 (Telegram group with topics: reports, errors, AI activity) is done.
+
+**How it works**
+- One private **supergroup with Topics** replaces the DM-only firehose. Run `/group_setup` inside the group (bot must be admin with "Manage topics"); it creates the topics and stores the group + topic ids in the new `telegram_routes` table, so no `.env` change is needed. `/group_setup reset` recreates them, `/group_status` shows where things go.
+- **Topics:** 📊 Daily report · 🗓 Weekly summary · 📅 Monthly summary · 🚨 Errors · 🤖 AI activity · 🔔 Alerts.
+- **Routing is in one place** (`topic_for_alert` in `telegram/topics.py`, called from `create_and_send_alert`): `failure_cluster` -> Errors, `ai_action` -> AI activity, anything else -> Alerts, and any other **critical** alert -> Errors. Snooze still applies exactly as before.
+- **Fallback:** if no group is configured, or a send to it fails (e.g. a topic was deleted), the message goes to DMs as before. Nothing is lost.
+- **Reports** (`backend/reports/periodic.py`, plain text): daily 08:00 UTC, weekly Monday 08:10, monthly on the 1st at 08:15 (last 24h / 7d / 30d). Each shows wallets (total, active, not active by status, gas wallets, wallets that completed a task), tasks completed / failed / skipped and success rate, gas spent, most active projects, projects with most failures, top failure causes, open alerts, circuit breakers, and (daily) daily targets reached. Every number is a database query; the AI narrative (from `analyst.py`) is appended when available and the report goes out without it if AI is down.
+- **AI activity digest** daily 08:05 UTC: autonomy frozen/active, autonomous actions in the last 24h with their `A<id>`, validations by type with average agreement, and how many validations/suggestions are waiting for you.
+- `/report_now [daily|weekly|monthly|ai]` sends any report immediately.
+- `send_telegram_message` now takes `topic=`, splits messages over 4000 characters, and retries as plain text if Telegram rejects the Markdown.
+
+**Notes**
+- Keep the group **private**: reports include aggregate numbers and AI action summaries with short wallet addresses.
+- Only whitelisted user ids can run commands in the group; everyone else's messages are ignored.
+- The old `send_daily_summary` in `alerts.py` is no longer scheduled (the new daily report replaces it); it can be deleted now or later, but dont forget to delete it.
+- No frontend change in this phase.
+
+**Migration:** none. `telegram_routes` is a new table created by `create_all()`.
+
+**New/edited files in Phase 8**
+- `backend/telegram/topics.py` — new
+- `backend/telegram/group_commands.py` — new
+- `backend/reports/periodic.py` — new
+- `backend/telegram/sender.py` — replace
+- Patched in place by `apply_phase8_patches.py`: `backend/main.py`, `backend/core/scheduler.py`, `backend/telegram/alerts.py`, `backend/telegram/bot.py`, `backend/telegram/commands/help.py`
+
+## next up: phase 9
 
 ## Known, not built
 **every times you discovered somethings usefull and you didn't build/fix it, add it here and the dev team will lock at it and build it, don't forgot to add recommendations if there is any here too:**
@@ -169,6 +197,10 @@ Phase 7 (website build-out for what moved off Telegram, §4/§6) is done in this
 - **Telegram wizard/`/projects` UI mismatch**: quick-add offers types (bridge, lending, dex) the wizard and prompts do not know.
 - Gas multipliers only go up; no decay (Phase 6). Wallets that reach `cooldown` are still not auto-recovered (now manually recoverable from the Manage panel). `project_priority` only reduces.
 - `SwapTask` decimals: fixed in the code (`_get_decimals` looks up the real token decimals) but the old "known, not fixed" note is still in §0.5; verify with a USDC test swap on testnet before trusting it.
+**added in Phase 8**
+Report times are fixed (UTC) in code; no dashboard control. Recommend a Settings card with report schedule + a "send test message to each topic" button.
+Reports go to one group only; no per-topic mute. Telegram's own topic mute covers this for now.
+If a topic is deleted in Telegram, sends fall back to DMs until /group_setup reset is run. Recommend auto-detecting "thread not found" and re-cre
 
 ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
 - **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.

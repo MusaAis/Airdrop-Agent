@@ -4,6 +4,7 @@ from sqlalchemy import select, func
 from backend.models import Alert, Log, Transaction, Wallet, Project, TaskDailyProgress
 from backend.database import async_session
 from backend.telegram.sender import send_telegram_message
+from backend.telegram.topics import topic_for_alert
 
 logger = logging.getLogger("airdrop.alerts")
 
@@ -35,7 +36,7 @@ async def create_and_send_alert(
         try:
             icon = {"critical": "🔴", "warning": "⚠️", "info": "ℹ️"}.get(severity, "📢")
             full_msg = f"{icon} *{type.upper().replace('_', ' ')}*\n{message}"
-            await send_telegram_message(full_msg, parse_mode="Markdown")
+            await send_telegram_message(full_msg, parse_mode="Markdown", topic=topic_for_alert(type, severity))
             alert.sent_telegram = True
             await db.commit()
         except Exception as e:

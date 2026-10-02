@@ -158,8 +158,8 @@ async def _run_ai_autonomy():
 
 async def _run_daily_summary():
     try:
-        from backend.telegram.alerts import send_daily_summary
-        await send_daily_summary()
+        from backend.reports.periodic import send_period_report
+        await send_period_report("daily")
     except Exception as e:
         logger.error(f"Daily summary error: {e}")
 
@@ -193,6 +193,30 @@ async def _run_contract_check():
         logger.error(f"Contract check error: {e}")
 
 
+async def _run_weekly_report():
+    try:
+        from backend.reports.periodic import send_period_report
+        await send_period_report("weekly")
+    except Exception as e:
+        logger.error(f"Weekly report error: {e}")
+
+
+async def _run_monthly_report():
+    try:
+        from backend.reports.periodic import send_period_report
+        await send_period_report("monthly")
+    except Exception as e:
+        logger.error(f"Monthly report error: {e}")
+
+
+async def _run_ai_report():
+    try:
+        from backend.reports.periodic import send_ai_report
+        await send_ai_report()
+    except Exception as e:
+        logger.error(f"AI report error: {e}")
+
+
 def start_scheduler():
     sched = get_scheduler()
 
@@ -208,6 +232,10 @@ def start_scheduler():
         IntervalTrigger(minutes=10, start_date=datetime.now(timezone.utc) + timedelta(minutes=2)),
         id="ai_autonomy", replace_existing=True,
     )
+
+    sched.add_job(_run_ai_report,      CronTrigger(hour=8, minute=5),  id="ai_report",      replace_existing=True)
+    sched.add_job(_run_weekly_report,  CronTrigger(day_of_week="mon", hour=8, minute=10), id="weekly_report",  replace_existing=True)
+    sched.add_job(_run_monthly_report, CronTrigger(day=1, hour=8, minute=15), id="monthly_report", replace_existing=True)
 
     if not sched.running:
         sched.start()

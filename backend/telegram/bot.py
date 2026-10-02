@@ -74,6 +74,7 @@ from backend.telegram.commands.agent import (
     handle_agent_kill, handle_agent_dryrun_on, handle_agent_dryrun_off,
 )
 from backend.telegram.sender import set_bot_app
+from backend.telegram.group_commands import register_group_handlers
 
 
 # -------------------------------------------------------------------
@@ -598,6 +599,7 @@ def build_bot():
     app.add_handler(CommandHandler("commands", commands_cmd))
     app.add_handler(CommandHandler("agent_unlock", agent_unlock_cmd))
     app.add_handler(CommandHandler("report_summary", report_summary_cmd))
+    register_group_handlers(app)
 
     # All other commands via make_cmd (auto-detects signature)
     handlers = [

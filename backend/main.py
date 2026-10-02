@@ -7,6 +7,7 @@ from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD
 from sqlalchemy import select
 from backend.models import User
 from backend.security.auth import get_password_hash
+import backend.telegram.topics  # noqa: F401  (registers telegram_routes table before init_db)
 import backend.core.autonomy_models  # noqa: F401  (registers ai_actions tables before init_db)
 import uvicorn
 

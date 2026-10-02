@@ -150,7 +150,10 @@ HELP_PAGES = {
     "system": (
         "⚙️ SYSTEM COMMANDS\n"
         "/system_status — Full system health\n"
-        "/system_version — Version + uptime\n\n"
+        "/system_version — Version + uptime\n"
+        "/group_setup — (run inside the group) create report topics\n"
+        "/group_status — Where reports are being sent\n"
+        "/report_now [daily|weekly|monthly|ai] — Send a report now\n\n"
         "RPC testing, maintenance windows, and log archival are on the\n"
         "website dashboard. There is no automated backup system — back up\n"
         "the database yourself outside the app."
