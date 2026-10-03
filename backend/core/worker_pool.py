@@ -122,6 +122,20 @@ class WorkerPool:
                 logger.error(f"Log write failed: {e}")
 
         async with async_session() as db:
+            # The queue items were built inside queue_manager's session, which is already
+            # closed, so wallet/project are DETACHED objects. Changing wallet.failure_count,
+            # wallet.status or project.consecutive_failures on them and committing this
+            # session wrote nothing, so cooldowns, project circuit breakers and the autonomy
+            # failure trigger never fired. Reload both by id into THIS session (a reload,
+            # not merge(), so a stale queued copy can't overwrite newer DB values).
+            wallet = await db.get(Wallet, wallet.id)
+            project = await db.get(Project, project.id)
+            if wallet is None or project is None:
+                logger.warning(f"Wallet {key[0]} or project vanished before execution, dropping task")
+                async with self.lock:
+                    self.active_task_ids.discard(key)
+                return
+
             # Check if wallet+chain already has a DB active task row
             stmt = select(ActiveTask).where(
                 ActiveTask.wallet_id == wallet.id,

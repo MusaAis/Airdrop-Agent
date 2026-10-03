@@ -27,6 +27,25 @@ async def get_nonce(db: AsyncSession, wallet_id: int, chain_id: int) -> WalletNo
     return record
 
 
+ONCHAIN_NONCE_TIMEOUT_SECS = 15
+
+
+async def _pending_onchain_nonce(db: AsyncSession, wallet_id: int, chain_id: int) -> int:
+    """Next usable nonce according to the chain (counts txs still in the mempool)."""
+    from web3 import Web3
+    from backend.models import Wallet, Chain
+    from backend.chains.rpc_pool import get_web3
+    wallet = await db.get(Wallet, wallet_id)
+    chain = await db.get(Chain, chain_id)
+    if wallet is None or chain is None:
+        raise ValueError("wallet or chain not found")
+    w3 = await get_web3(chain)
+    return await asyncio.wait_for(
+        w3.eth.get_transaction_count(Web3.to_checksum_address(wallet.address), "pending"),
+        timeout=ONCHAIN_NONCE_TIMEOUT_SECS,
+    )
+
+
 async def lock_nonce(db: AsyncSession, wallet_id: int, chain_id: int) -> int:
     """
     Lock and return the current nonce.
@@ -43,6 +62,24 @@ async def lock_nonce(db: AsyncSession, wallet_id: int, chain_id: int) -> int:
             record.locked = True
             record.locked_at = datetime.now(timezone.utc)
             await db.commit()
+            # A new record starts at 0 and the stored value can fall behind the chain
+            # (wallet used elsewhere, funded wallet with history, replaced txs). Sending
+            # a stale nonce fails with "nonce too low", so never go below the chain's
+            # pending count. If the RPC read fails we keep the stored value: the tx then
+            # fails harmlessly instead of being sent with a guessed nonce.
+            try:
+                onchain = await _pending_onchain_nonce(db, wallet_id, chain_id)
+                if onchain > record.nonce:
+                    logger.info(
+                        f"Nonce raised to chain value: wallet={wallet_id} chain={chain_id} "
+                        f"stored={record.nonce} onchain={onchain}"
+                    )
+                    record.nonce = onchain
+                    await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.warning(f"Could not read on-chain nonce (wallet={wallet_id} chain={chain_id}): {e}")
+                record = await get_nonce(db, wallet_id, chain_id)
             logger.debug(f"Nonce locked: wallet={wallet_id} chain={chain_id} nonce={record.nonce}")
             return record.nonce
 

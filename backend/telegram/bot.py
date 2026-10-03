@@ -1,5 +1,7 @@
 import logging
 import inspect
+import functools
+import contextvars
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from backend.config import TELEGRAM_BOT_TOKEN
@@ -85,10 +87,13 @@ import time as _time
 _PENDING_CONFIRMATIONS: dict = {}
 _CONFIRM_TTL_SECS: int = 60  # confirmation expires after 60 s
 
-def _set_pending(user_id: int, action: str, params: dict):
+def _set_pending(user_id: int, action: str, params: dict, runner=None):
+    """runner: optional async callable(db) -> str, used by slash commands that
+    cannot be replayed through dispatch_action (they re-run the exact handler call)."""
     _PENDING_CONFIRMATIONS[user_id] = {
         "action": action,
         "params": params,
+        "runner": runner,
         "expires_at": _time.monotonic() + _CONFIRM_TTL_SECS,
     }
 
@@ -106,6 +111,47 @@ _CONFIRM_REQUIRED = {
     "agent.kill", "wallet.blacklist", "chain.disable",
     "nonce.release_all",
 }
+
+# -------------------------------------------------------------------
+# Confirmation plumbing.
+# Many handlers return "...Reply 'confirm'" when called with confirmation=None and
+# only act when called with confirmation="confirm". Nothing ever staged those calls
+# or passed confirmation, so the 'confirm' reply could never complete them. Now:
+#   1. any handler response that asks for confirmation is staged as a pending action
+#      (_stage_if_prompt), and
+#   2. the 'confirm' reply re-runs it with _CONFIRMED set; the wrapper installed below
+#      then passes confirmation="confirm" to the handler.
+# -------------------------------------------------------------------
+_CONFIRMED: contextvars.ContextVar = contextvars.ContextVar("airdrop_confirmed", default=False)
+_CONFIRM_PROMPT_MARKER = "Reply 'confirm'"
+
+
+def _is_confirm_prompt(text) -> bool:
+    return isinstance(text, str) and _CONFIRM_PROMPT_MARKER in text
+
+
+def _confirm_hint(text: str) -> str:
+    return f"{text}\n(or reply 'cancel'; expires in {_CONFIRM_TTL_SECS} s)"
+
+
+def _confirmable(handler):
+    @functools.wraps(handler)
+    async def _wrapped(*args, **kwargs):
+        if _CONFIRMED.get() and "confirmation" not in kwargs:
+            kwargs["confirmation"] = "confirm"
+        return await handler(*args, **kwargs)
+    return _wrapped
+
+
+def _install_confirm_wrappers():
+    g = globals()
+    for name, fn in list(g.items()):
+        if (name.startswith("handle_") and inspect.iscoroutinefunction(fn)
+                and "confirmation" in inspect.signature(fn).parameters):
+            g[name] = _confirmable(fn)
+
+
+_install_confirm_wrappers()
 
 logger = logging.getLogger("airdrop.telegram.bot")
 app = None
@@ -131,17 +177,20 @@ def make_cmd(handler):
             await update.message.reply_text("⛔ Unauthorized")
             return
         from backend.database import async_session
+        uid = update.effective_user.id
+        cmd_args = list(context.args or [])
+        if "args" in param_names:
+            # Pattern: (user_id, args, db, ...)
+            runner = lambda d: handler(uid, cmd_args, d)
+        else:
+            # Patterns: (user_id, db) and (user_id, db, confirmation=None)
+            runner = lambda d: handler(uid, d)
         async with async_session() as db:
             try:
-                if "args" in param_names:
-                    # Pattern: (user_id, args, db, ...)
-                    response = await handler(update.effective_user.id, context.args or [], db)
-                elif len(param_names) == 2:
-                    # Pattern: (user_id, db)
-                    response = await handler(update.effective_user.id, db)
-                else:
-                    # Pattern: (user_id, db, confirmation=None)
-                    response = await handler(update.effective_user.id, db)
+                response = await runner(db)
+                if _is_confirm_prompt(response):
+                    _set_pending(uid, f"cmd:{getattr(handler, '__name__', 'handler')}", {}, runner=runner)
+                    response = _confirm_hint(response)
             except Exception as e:
                 logger.exception("Handler error: %s", e)
                 response = f"❌ Error: {str(e)}"
@@ -153,11 +202,13 @@ def make_cmd(handler):
 # -------------------------------------------------------------------
 # Shared action dispatcher
 # -------------------------------------------------------------------
-async def dispatch_action(user_id: int, action: str, params: dict, db) -> str:
+async def dispatch_action(user_id: int, action: str, params: dict, db, confirmed: bool = False) -> str:
+    """confirmed=True is passed only by the 'confirm' reply handler: it skips staging
+    (otherwise the action would be re-staged forever and never run)."""
     resp = f"⚠️ Unknown action: '{action}'. Try /help"
     try:
         # Stage destructive actions and wait for "confirm" reply
-        if action in _CONFIRM_REQUIRED:
+        if action in _CONFIRM_REQUIRED and not confirmed:
             _set_pending(user_id, action, params)
             labels = {
                 "agent.kill": "🔴 EMERGENCY STOP — halt all agent activity",
@@ -406,6 +457,12 @@ async def dispatch_action(user_id: int, action: str, params: dict, db) -> str:
         logger.exception("dispatch_action failed action=%s", action)
         resp = f"❌ Error in {action}: {str(e)}"
 
+    # A handler that asked for confirmation (wallet.pause, task.pause, tx.cancel, ...)
+    # must be staged, otherwise the user's 'confirm' reply finds nothing to confirm.
+    if not confirmed and _is_confirm_prompt(resp):
+        _set_pending(user_id, action, params)
+        resp = _confirm_hint(resp)
+
     return resp or "✅ Done."
 
 
@@ -461,6 +518,17 @@ async def commands_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for page in get_all_pages():
         if page.strip():
             await update.message.reply_text(page)
+
+
+async def agent_kill_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/agent_kill — emergency stop. Always goes through the confirm step."""
+    if not is_whitelisted(update.effective_user.id):
+        await update.message.reply_text("⛔ Unauthorized")
+        return
+    from backend.database import async_session
+    async with async_session() as db:
+        resp = await dispatch_action(update.effective_user.id, "agent.kill", {}, db)
+    await update.message.reply_text(resp or "✅ Done.")
 
 
 async def agent_unlock_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -555,8 +623,20 @@ async def fallback_nl(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⚠️ Nothing to confirm (or confirmation expired).")
             return
         from backend.database import async_session
-        async with async_session() as db:
-            resp = await dispatch_action(user_id, pending["action"], pending["params"], db)
+        token = _CONFIRMED.set(True)
+        try:
+            async with async_session() as db:
+                if pending.get("runner"):
+                    resp = await pending["runner"](db)
+                else:
+                    resp = await dispatch_action(
+                        user_id, pending["action"], pending["params"], db, confirmed=True
+                    )
+        except Exception as e:
+            logger.exception("confirmed action failed: %s", e)
+            resp = f"❌ Error: {e}"
+        finally:
+            _CONFIRMED.reset(token)
         await update.message.reply_text(resp or "✅ Done.")
         return
     if raw_text_lower == "cancel":
@@ -598,6 +678,7 @@ def build_bot():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("commands", commands_cmd))
     app.add_handler(CommandHandler("agent_unlock", agent_unlock_cmd))
+    app.add_handler(CommandHandler("agent_kill", agent_kill_cmd))
     app.add_handler(CommandHandler("report_summary", report_summary_cmd))
     register_group_handlers(app)
 
