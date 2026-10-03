@@ -1,0 +1,2199 @@
+diff --git a/PLAN.md b/PLAN.md
+index ec03e56..2e8c5c4 100644
+--- a/PLAN.md
++++ b/PLAN.md
+@@ -210,7 +210,44 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
+ - `backend/api/routes/claims.py` new; `backend/main.py`, `backend/api/routes/wallets.py` small edits
+ - `frontend/`: `src/index.css`, `App.jsx`, `vite.config.js`, `components/{ui,nav,Sidebar,BottomNav,Topbar,Toast,Confirm,LiveLog,WalletManage,StatsOverview,SystemPanel}`, `hooks/{useApi,useLiveFeed}.js`, `lib/format.js`, pages `{Dashboard,Wallets,Balances,Projects,Tasks,Proxies,Logs,AiLog,Claims,Sybil,Snapshot,Notifications,Login,Chains,Faucets,ProjectDetail}`
+ 
+-## next up: phase 10 (documentation)
++## 0.10 Phase 10 completion notes
++Phase 10 (documentation) is done: `README.md`, `ROADMAP.md` and `docs/` (`ARCHITECTURE.md`, `HOW-IT-WORKS.md`, `SECURITY.md`, `DEPLOYMENT.md`, `REFERENCE.md`). They were written from the code, not from this plan, and `docs/SECURITY.md` lists every gap that was open at the time. They are kept current with each change below; if a doc and the code disagree, the code wins and the doc is a bug.
++
++## 0.11 Phase 11 completion notes: hardening and reliability pass
++Not in the original phase list: it works through `airdrop-agent-review.md` from C7 onward and then the first three ROADMAP items. Every item below has automated tests (`backend/test_security_fixes.py` 66 checks, `test_killswitch_persist.py` 22, `test_scheduling.py` 35, `test_native_gas.py` 27, plus `test_c2c3c4.py`). Run them from the repo root with `python3 -m backend.<name>`; none needs network, a chain or Telegram.
++
++**Auth and secrets (review C7, C8, H1, H6, H7, H8, H9)**
++- `security/auth.py`: every JWT now carries a `type` (`access`, `refresh`; the device-trust cookie keeps its own). `decode_token(token, expected_type)` requires the type, so a refresh or device-trust token is no longer a Bearer token and an access token can no longer be "refreshed". Tokens issued before this change have no `type` and are rejected: everyone logs in once more.
++- `api/routes/auth.py`: `/auth/refresh` takes `{"refresh_token"}` in the body (not the URL) and checks the user still exists. `/auth/totp/setup` needs the account password (plus a current code if 2FA is on); the new secret stays in memory until `/auth/totp/verify-setup` succeeds, so a failed or abandoned replacement never disables 2FA; `/auth/totp/disable` needs password + code; failures on the three TOTP routes are limited to 5 per 15 min per user. Unknown usernames cost the same bcrypt work as wrong passwords.
++- `security/startup_checks.py` (new) + `main.py`: the server refuses to start if `SECRET_KEY` is empty/placeholder/< 32 chars or `MASTER_PASSWORD` is empty/placeholder/< 8 chars (8-11 chars only warns, because that value also encrypts stored keys and cannot be rotated casually). `ALLOW_INSECURE_SECRETS=true` is a loud local-development escape hatch.
++- Removed: `POST /agent/wallets/{id}/private-key` (key export) and the unused `/webhooks` router (SSRF).
++- `wallet/manager.py`: imported keys accept `0x`/whitespace/uppercase (`normalize_private_key`); bad input is a 400 that never echoes the key, a duplicate address is a 409.
++- Chains have a `coingecko_id` (API + Chains page). `wallet/balance.py:chain_coingecko_id` uses it, else a built-in symbol map (`ETH` -> `ethereum`); ERC20 balance calls use checksummed addresses.
++- `requirements.txt`: `bcrypt>=4.0.1,<5` (passlib 1.7.4 fails to hash anything with bcrypt 5.x).
++
++**Fees (review H2)**
++- `tasks/base.py:_record_fee` writes `gas_used`, `gas_token`, `gas_cost_native` (fee actually paid, in gas-token units) and `gas_cost_usd` (native x CoinGecko price, empty if the lookup fails) from the receipt, for confirmed AND reverted transactions. Failed transactions store `error_message`. `Log.gas_cost_usd` is filled for successes.
++
++**Schema (SQLite)**
++- `database.py:_sqlite_add_missing_columns`: `init_db()` adds any model column missing from an existing table (nullable, or with a scalar default). New this pass: `chains.coingecko_id`, `transactions.gas_cost_native`, `wallets.next_available_at`, and the new table `kill_switch_state`. Renames/drops/other NOT NULL columns still need manual SQL; Alembic is still not wired.
++
++**Persisted emergency stop and dry-run (ROADMAP 1)**
++- `core/kill_switch.py`: new single-row table `kill_switch_state`. `activate_kill_switch`/`deactivate_kill_switch` write it in the same transaction as `agent_status`; the dashboard toggle, `POST /ops/system/dry-run` and the Telegram natural-language dry-run actions (`agent.dryrun`, `agent.dryrun_off`) go through `set_dry_run_persistent`. `load_kill_switch_state()` runs at startup after `init_db()` and before the scheduler and agent loop: the emergency stop is restored as saved; dry-run is ON if saved ON **or** `DRY_RUN_MODE=true` (the env can force it on at boot, never off). If the state cannot be read it fails safe: emergency stop + dry-run. `agent_pause_all` uses the emergency stop, so it now persists too (`/agent_resume_all` or the dashboard "Clear emergency stop" ends it).
++
++**Human-like pacing (ROADMAP 2 / review H4)**
++- New `core/scheduling.py`; `core/queue_manager.py` and `core/worker_pool.py` use it. After every real attempt `TaskSchedule.next_run_at` is set (success: `frequency_mins` x U(0.8, 1.4); failure: ~10 min x U(0.8, 1.5); skip, gas-spike or memory deferral: U(3, 8) min) and `Wallet.next_available_at` is set to now + the wallet's `sleep_min_mins..sleep_max_mins`. Candidates must be past both, and past their personal start offset after the active window opens (`behavior_randomizer.has_started_for_the_day`: deterministic per wallet and day, `[0, start_offset_max_mins]`). A wallet gets one task per fill cycle, also across projects. Dry-run ("simulated") results never touch the schedule.
++- `last_selected_at` is now written, so least-recently-used rotation works (it previously compared naive DB values with an aware `datetime.min`, a latent `TypeError`). The old `asyncio.sleep(min(delay, 30))` after enqueue (which only blocked the fill loop) is gone.
++- Behaviour change to expect: a wallet can no longer burn its whole daily target back to back. With `frequency_mins=120` and a 12 h active window a wallet manages roughly 5-6 successes a day, so set `frequency_mins` and `daily_tx_min/max` consistently or targets will show as unmet.
++
++**Gas in reports (ROADMAP 3)**
++- New `reports/gas_native.py`. The dashboard overview (24h/7d/all-time and per project), daily/weekly/monthly reports, Telegram `/report_gas`, `/report_weekly`, gas cost per wallet, wallet compare, the daily-summary alert and the AI analyst now report gas per token (`0.0035 ETH · 0.0004 BNB`), never summed across tokens. Gas spent includes reverted transactions (they burn gas) and ignores rows recorded before fee tracking. API payloads keep their `gas_usd` fields and add `gas_native` / `gas_native_text`. The analyst's fact pack no longer contains a USD gas figure for the model to narrate, and its gas-spike flag now works per token.
++
++**Not changed on purpose:** the IP-whitelist middleware stays disabled (network exposure is handled at the host/tunnel level; `ALLOWED_IPS` has no effect).
++
++**Migration:** none by hand on SQLite (columns and the new table are added at start-up). Run `pip install -r backend/requirements.txt`. A fresh database needs nothing.
++
++## next up
++See `ROADMAP.md` ("Next"). Phases 1-11 are built.
+ 
+ ## Known, not built
+ **every times you discovered somethings usefull and you didn't build/fix it, add it here and the dev team will lock at it and build it, don't forgot to add recommendations if there is any here too:**
+@@ -221,8 +258,8 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
+ **added in Phase 7, with recommendations**
+ - ~~Claims page is dead~~ (Phase 9: read-only `/claims/scan` built). Still open: manual claim execution with confirm + dry-run. **Claims page is dead (old note)**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box.
+ - **Project blacklist is unenforced**: `CompletedProjectsBlacklist` was only read by the removed discovery code. Recommend: either check it in project creation (route + Telegram wizard) or drop the table and command.
+-- **`DRY_RUN_MODE` env is ignored**: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
+-- **Emergency stop is in memory too** and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
++- ~~**`DRY_RUN_MODE` env is ignored**~~ (Phase 11: read at startup, forces dry-run on; the toggle is persisted). Old note: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
++- ~~**Emergency stop is in memory too**~~ (Phase 11: persisted in `kill_switch_state`; the dashboard already has Agent start/stop). Old note: and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
+ - **Faucets**: ~~`method: GET` faucets sent as POST~~ (fixed in the verification pass); only `{address}` can be templated. `faucet/handlers/http_post.py` is unused and passes `proxies=`, which httpx >= 0.28 removed (delete it or use `client_proxy_kwargs`).
+ - **Proxies cover faucet claims only.** RPC calls and the transactions themselves still come from the server IP. Recommend: if Sybil-hardening matters, route RPC per wallet through its proxy (needs a per-wallet web3 provider). `Wallet.proxy_id` is an unused duplicate of `Proxy.wallet_id`.
+ - **Sessions**: a reload no longer logs you out (Phase 9) but the refresh-token endpoint is still never used by the frontend (30 min expiry -> re-login). Recommend: use the refresh token (httpOnly cookie) so a reload or 30-minute expiry does not force a re-login, still keeping the access token out of localStorage.
+@@ -238,7 +275,7 @@ If a topic is deleted in Telegram, sends fall back to DMs until /group_setup res
+ 
+ **added in the Phase 7 verification pass / Phase 9**
+ - **Claim EXECUTION is still not implemented anywhere** (Telegram `/claim_trigger` only prints instructions). Needs a TaskConfig-less transaction path (`Transaction.task_config_id` is NOT NULL). Recommend: manual claim with a confirm dialog + dry-run, never automatic.
+-- **`Transaction.gas_cost_usd` is never written**, so every "Gas $" figure is 0. Needs gas_used x price at confirm time; on testnet the USD value is meaningless anyway, so consider showing native gas instead.
++- ~~**`Transaction.gas_cost_usd` is never written**~~ (Phase 11: fees are recorded per transaction and reports show native gas per token). Old note: so every "Gas $" figure is 0. Needs gas_used x price at confirm time; on testnet the USD value is meaningless anyway, so consider showing native gas instead.
+ - **Gas multiplier is applied twice**: `persona.gas_multiplier` in each task's build step AND `WalletSettings.gas_multiplier` in `BaseTask.execute`. Pick `WalletSettings` as the single source.
+ - **Dry-run pauses automatic queue filling** (`agent.periodic_fill`); the Telegram text "will simulate" is inaccurate.
+ - **Telegram maintenance window** (`system_maintenance`) was never enforced by the scheduler/queue.
+@@ -250,6 +287,14 @@ If a topic is deleted in Telegram, sends fall back to DMs until /group_setup res
+ - **`derive_hd_wallet` had dead code** (`HDWalletMnemonic("english")`) that raises on eth-account >= 0.13; removed, so a dependency upgrade cannot break wallet derivation. Consider pinning `eth-account` in `requirements.txt`.
+ - **Live feed URL**: if `VITE_BACKEND_WS_URL` is not set it is derived from `VITE_API_BASE_URL` (https -> wss) instead of assuming the Vercel origin. Error toasts now include the HTTP status, and the Dashboard Overview card shows the real reason it could not load.
+ 
++**added in Phase 11**
++- **Pacing edge cases:** editing a task's `frequency_mins` does not re-time an existing `next_run_at` (the old time must elapse first). Manual triggers (`/ops` task trigger, run-all, Telegram `task_trigger`) are not paced and do not update the schedule. Persona re-roll and wallet recover do not clear `next_available_at`. `TaskSchedule` rows are never pruned when a task or wallet is deleted. Recommend: reset the schedule on those edits and add the "why am I not running?" view (it can now read `next_available_at` / `next_run_at`).
++- **H4 leftovers:** `randomize_amount()` still ignores `WalletSettings.amount_*_override` / `amount_vary_daily`.
++- **Daily targets vs frequency:** a target the pacing cannot reach inside the active window shows as unmet; nothing warns about it. Recommend a warning in the task form when `daily_tx_min x frequency_mins` exceeds the window length.
++- **Gas figures:** `gas_cost_usd` is only an estimate (a testnet token priced at its mainnet value) and is empty when CoinGecko fails; `Log` has no native column; `/reports/*` JSON endpoints other than gas still show raw USD; `projects/eligibility.py` and `tasks/metric_tasks.py` still use `gas_cost_usd` as a volume proxy, so the `volume` criterion is unreliable. Transactions recorded before fee tracking have no fee and read as zero/none recorded.
++- **Kill switch:** `agent_stop` / `POST /agent/stop` (loop stopped, no emergency) is not persisted; the loop auto-starts at boot. Dry-run still pauses automatic queue filling (unchanged).
++- **Auth leftovers:** login lockout still keys on `request.client.host` (the proxy address behind a tunnel); the JWT is still in `localStorage`; refresh tokens cannot be revoked individually (rotate `SECRET_KEY`); 2FA enrolment has no dashboard screen; `MASTER_PASSWORD` is still both login password and key-encryption password (splitting needs a re-encryption migration).
++
+ ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
+ - **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.
+ - **Audit log of manual actions** (who pressed Recover/Run now/Blacklist, when). The AI already has `ai_actions`; manual changes have none. Cheap to add and valuable once more than one person uses the panel.
+@@ -323,7 +368,7 @@ A self-hosted airdrop farming agent: manages HD/imported wallets across multiple
+ - Eligibility %, ROI *(removed)*, daily progress, gas usage, Sybil report, activity log, live server health (RAM/CPU/disk/worker slots), CSV export
+ 
+ ### Auth & security
+-- JWT access + refresh tokens, TOTP 2FA with QR enrollment, device-trust cookies (skip 2FA on remembered devices), brute-force lockout (DB-persisted), IP whitelist middleware, encrypted seed/private-key storage
++- JWT access + refresh tokens (typed: a token is accepted only by the endpoint that expects its type), TOTP 2FA with QR enrollment (API-only; password + current code needed to replace/disable), device-trust cookies (skip 2FA on remembered devices), brute-force lockout (DB-persisted), encrypted seed/private-key storage, startup refusal on weak `SECRET_KEY`/`MASTER_PASSWORD`. IP whitelist middleware exists but is intentionally disabled.
+ - **(Removed — see §3)** Encrypted nightly DB backup
+ 
+ ### Interfaces
+@@ -336,8 +381,8 @@ A self-hosted airdrop farming agent: manages HD/imported wallets across multiple
+ - **(Removed — see §3)** New-project-found alerts (discovery is gone)
+ 
+ ### Kill switch
+-- Emergency stop: halts new task dispatch and clears the queue; cannot un-broadcast an already-submitted transaction
+-- Global dry-run toggle enforced at the actual broadcast point, not just the queue-fill loop
++- Emergency stop: halts new task dispatch and clears the queue; cannot un-broadcast an already-submitted transaction. Persisted across restarts.
++- Global dry-run toggle enforced at the actual broadcast point, not just the queue-fill loop. Persisted across restarts; `DRY_RUN_MODE=true` forces it on at boot.
+ 
+ ---
+ 
+@@ -495,7 +540,8 @@ Ideas worth considering after the current phase, not committed to yet:
+ 7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
+ 8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *built*
+ 9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *built*
+-10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
++10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *built*
++11. **Phase 11 - Hardening and reliability pass** (review C7-H9, persisted kill switch/dry-run, human-like pacing, native-gas reports; not in the original list, see §0.11). *built*
+ 
+ This grouping is a suggestion, not a commitment — order can change based on what MusaAis wants tackled first once execution begins.
+ 
+diff --git a/README.md b/README.md
+index f540d74..df025ca 100644
+--- a/README.md
++++ b/README.md
+@@ -8,7 +8,7 @@ A self-hosted agent that farms testnet airdrops. It manages many EVM wallets, ru
+ - **Wallets**: HD wallets from one master seed or imported private keys (encrypted at rest), tags, per-wallet persona (active hours, gas multiplier, daily tx range), health and Sybil scores.
+ - **Chains**: primary + fallback RPCs, gas sampling every 10 min with spike detection, token registry, optional CoinGecko id for USD pricing.
+ - **Projects and tasks**: priority-weighted queue, daily targets, dependencies, eligibility criteria, circuit breaker, soft-archive, manual eligibility declaration.
+-- **Execution engine**: fixed worker slots, nonce locking synced to chain, pre-flight simulation, dry-run, stuck-tx speed-up/cancel, watchdog, per-transaction fee tracking.
++- **Execution engine**: fixed worker slots, nonce locking synced to chain, pre-flight simulation, persisted dry-run and emergency stop, stuck-tx speed-up/cancel, watchdog, per-transaction fee tracking, human-like pacing (frequency, sleep, per-day start offset).
+ - **AI layer**: dual-model validation (70% agreement gate), failure-cluster analysis, bounded autonomous actions (pause wallet, gas multiplier, disable task, lower priority), all logged and undoable.
+ - **Interfaces**: web dashboard (phone + desktop), Telegram bot (quick-action remote) and a Telegram group with topics for reports.
+ 
+@@ -16,7 +16,7 @@ A self-hosted agent that farms testnet airdrops. It manages many EVM wallets, ru
+ | Path | Purpose |
+ |---|---|
+ | `backend/` | FastAPI app, agent loop, scheduler, models |
+-| `backend/core/` | queue, worker pool, nonce manager, kill switch, autonomy, failure analysis |
++| `backend/core/` | queue, pacing, worker pool, nonce manager, kill switch, autonomy, failure analysis |
+ | `backend/tasks/` | task types (swap, bridge, stake, liquidity, transfer, generic) |
+ | `backend/ai/` | Gemini/Groq clients, key pools, orchestrator, prompts |
+ | `backend/security/` | JWT auth, TOTP, brute-force lockout, startup secret checks |
+@@ -40,8 +40,11 @@ The server **refuses to start** with an empty/short/placeholder `SECRET_KEY` or
+ 
+ ## Tests
+ ```bash
+-python3 -m backend.test_security_fixes                                  # auth, secrets, 2FA, import, fees, migration
+-TELEGRAM_ALLOWED_USER_IDS='["42"]' python3 -m backend.test_c2c3c4       # gas units, nonce, Telegram confirm flow
++python3 -m backend.test_security_fixes      # auth, secrets, 2FA, import, fees, column migration
++python3 -m backend.test_killswitch_persist  # emergency stop / dry-run survive restarts
++python3 -m backend.test_scheduling          # human-like pacing
++python3 -m backend.test_native_gas          # per-token gas in reports
++TELEGRAM_ALLOWED_USER_IDS='["42"]' python3 -m backend.test_c2c3c4   # gas units, nonce, Telegram confirm flow
+ ```
+ Both use throwaway SQLite files and need no network or chain.
+ 
+diff --git a/ROADMAP.md b/ROADMAP.md
+index 0635fe1..7ad316c 100644
+--- a/ROADMAP.md
++++ b/ROADMAP.md
+@@ -5,18 +5,18 @@ History lives in `PLAN.md` (phases 1-10). This file is the forward view.
+ ## Done
+ Phases 1-9: removals and trim, project wizard, NL + AI analyst, failure analysis, bounded AI autonomy, website build-out, Telegram topics and reports, redesign. Phase 10: documentation (`docs/`).
+ 
+-Verification and hardening passes (see `airdrop-agent-review.md`): gas units, detached-object persistence, nonce sync, dry-run approvals, Telegram confirm flow, agent stop, then typed JWTs (C7), startup secret checks (C8), protected 2FA enrolment (H1), per-transaction fee recording (H2), removal of key export (H6) and the webhook registry (H7), `0x` key import (H8), CoinGecko ids and checksummed ERC20 calls (H9), and automatic SQLite column additions.
++Verification and hardening passes (see `airdrop-agent-review.md` and `PLAN.md` §0.7b, §0.11): gas units, detached-object persistence, nonce sync, dry-run approvals, Telegram confirm flow, agent stop, then typed JWTs (C7), startup secret checks (C8), protected 2FA enrolment (H1), per-transaction fee recording (H2), removal of key export (H6) and the webhook registry (H7), `0x` key import (H8), CoinGecko ids and checksummed ERC20 calls (H9), automatic SQLite column additions, persisted emergency stop and dry-run (`DRY_RUN_MODE` honoured), human-like pacing (frequency, sleep, per-day start offset, wallet rotation), and per-token native gas in every report.
+ 
+ ## Next
+-1. **Persist emergency stop and dry-run**; read `DRY_RUN_MODE` at startup. Consider auto-unlock of the seed at boot if you accept the trade-off.
+-2. **Human-like scheduling (H4)**: honour `frequency_mins`, persona sleep times and per-wallet `next_run_at` (`TaskSchedule` is unused); update `last_selected_at`.
+-3. **Reports on native gas**: aggregate `gas_cost_native` (factual) instead of, or next to, the testnet-meaningless USD figure; unify the two eligibility implementations.
+-4. Unify the gas multiplier (persona vs `WalletSettings`).
+-5. Wire Alembic (`target_metadata`, first revision) for renames/drops/Postgres; the automatic column adder only covers additive SQLite changes.
+-6. Add tests and CI beyond the two current suites: nonce lock/sync edge cases, agreement scoring, error classification, autonomy bounds, project dispatch.
+-7. Pin dependencies; check `signed.rawTransaction` and `tx_hash.hex()` against current `eth-account`/`hexbytes`.
+-8. Login limiter keyed on the real client IP behind a proxy; httpOnly refresh cookie with an in-memory access token.
+-9. Separate key-encryption secret from the login password (needs a re-encryption migration).
++1. **Reports and eligibility on facts**: unify the two eligibility implementations and replace the `gas_cost_usd` volume proxy (a real per-transaction amount is not tracked); extend per-token gas to the remaining `/reports/*` JSON endpoints.
++2. **Pacing follow-ups**: reset `next_run_at` when `frequency_mins` is edited, clear sleep on persona re-roll/recover, prune `TaskSchedule` rows for deleted tasks/wallets, warn in the task form when the daily target cannot fit the active window, and the per-wallet "why am I not running?" view (the data now exists). Honour `WalletSettings.amount_*_override` in `randomize_amount()`.
++3. Unify the gas multiplier (persona vs `WalletSettings`).
++4. Wire Alembic (`target_metadata`, first revision) for renames/drops/Postgres; the automatic column adder only covers additive SQLite changes.
++5. CI and wider tests: nonce lock/sync edge cases, agreement scoring, error classification, autonomy bounds, project dispatch. Five suites exist today, no CI.
++6. Pin dependencies; check `signed.rawTransaction` and `tx_hash.hex()` against current `eth-account`/`hexbytes`.
++7. Login limiter keyed on the real client IP behind a proxy; httpOnly refresh cookie with an in-memory access token.
++8. Separate key-encryption secret from the login password (needs a re-encryption migration).
++9. Persist the plain agent stop (`/agent_stop`) if you want it to survive a restart; consider auto-unlock of the seed at boot if you accept the trade-off.
+ 
+ ## Backlog (from PLAN.md and review)
+ - Autonomy recovery: gas multiplier decay, priority restore, auto-recover wallets in cooldown.
+diff --git a/airdrop-agent-review.md b/airdrop-agent-review.md
+index f30bc0c..c272d79 100644
+--- a/airdrop-agent-review.md
++++ b/airdrop-agent-review.md
+@@ -1,15 +1,47 @@
+ # Airdrop-Agent — Code Review
+ 
+ **Scope:** full backend + frontend snapshot of `MusaAis/airdrop-agent` (read from the files provided; not executed, so items marked *verify* need a quick runtime check).
+-**Overall:** The architecture is solid (clean module split, deterministic-first AI design, good guardrails in `autonomy.py`, good SSRF check in `projects.py`). But several **core execution paths are broken**, and the auth layer has real holes. Fix the Critical section first — right now I don't think a task can complete a live transaction.
++**Overall:** The architecture is solid (clean module split, deterministic-first AI design, good guardrails in `autonomy.py`, good SSRF check in `projects.py`). But several **core execution paths are broken**, and the auth layer has real holes. Fix the Critical section first — right now I don't think a task can complete a live transaction. *(Historical: see the Status table below; the Critical section is fixed.)*
+ 
+ Severity: 🔴 Critical · 🟠 High · 🟡 Medium · 🔵 Low/Polish
+ 
+ ---
+ 
++## Status (updated after Phase 11)
++✅ fixed and covered by tests · ◐ partly fixed · ⬜ open. Details of each fix are in `PLAN.md` §0.7b and §0.11.
++
++| Item | Status | Note |
++|---|---|---|
++| C1 gas units | ✅ | `fee_to_gas_token`, also in approval/simulation |
++| C2 detached objects | ✅ | reloaded by id in the worker session |
++| C3 nonce sync | ✅ | raised to the chain's pending count |
++| C4 Telegram confirm | ✅ | `confirmed` flag, `/agent_kill` registered |
++| C5 dry-run approvals | ✅ | |
++| C6 agent stop/double start | ✅ | `start_agent()` |
++| C7 token types | ✅ | `type` claim enforced everywhere; refresh in the body |
++| C8 weak secrets | ✅ | startup refusal (`startup_checks.py`). The login/key-encryption secret split is **not** done (needs a re-encryption migration) |
++| H1 2FA replace | ✅ | password (+ current code); pending secret held in memory |
++| H2 fee data | ✅ | `gas_used`, `gas_token`, `gas_cost_native`, `gas_cost_usd`, `error_message`; `Log` rows were fixed earlier |
++| H3 live log | ✅ | envelopes handled, port example fixed |
++| H4 human behaviour | ◐ | frequency, sleep, start offset, `last_selected_at`, one task per wallet per cycle: done. `randomize_amount()` still ignores `WalletSettings.amount_*_override` |
++| H5 restart mass failures | ✅ | HD wallets skipped while the seed is locked |
++| H6 key export | ✅ | endpoint removed |
++| H7 webhooks | ✅ | router deleted |
++| H8 `0x` import | ✅ | `normalize_private_key`, 400/409 |
++| H9 CoinGecko | ✅ | `Chain.coingecko_id` + symbol map, checksummed ERC20 calls |
++| Persist emergency stop / dry-run | ✅ | `kill_switch_state`; `DRY_RUN_MODE` forces dry-run on at boot |
++| Medium: `/auth/login` timing | ✅ | dummy hash on unknown user |
++| Medium: new columns not applied | ◐ | SQLite columns are added at startup; Alembic still not wired |
++| Ops: dashboard Kill button | ✅ | System panel |
++| Ops: IP whitelist, `/docs` public | ⬜ | **decision: stays disabled**; bind to localhost / firewall instead |
++| Everything else in Medium / Low / Library-compat / Ops | ⬜ | unchanged |
++| Tests | ◐ | five suites (`python3 -m backend.test_*`); no CI yet |
++
++---
++
+ ## 🔴 Critical (execution engine / money path)
+ 
+-### C1. Gas check compares ETH to wei → every task skips as `low_gas`
++### ✅ C1. Gas check compares ETH to wei → every task skips as `low_gas`
+ `tasks/base.py::execute`
+ `get_gas_token_balance()` returns **ether** (`wei / 1e18`), but `estimate_gas()` returns **wei** (`gas * gas_price`). `gas_balance < required_gas` is then `0.1 < 2.5e13` → always true → every run returns `skipped / low_gas`. Same mismatch in `tasks/approval.py` and `tasks/simulation.py`.
+ **Fix (minimal):** convert the estimate once:
+@@ -19,37 +51,37 @@ required_gas = (gas_estimation / Decimal(10 ** self.chain.gas_token_decimals)) *
+ ```
+ (Do the same in `approval.py` and `simulation.py`.)
+ 
+-### C2. Counters/status changes on detached objects are never saved
++### ✅ C2. Counters/status changes on detached objects are never saved
+ `core/worker_pool.py::_execute_task`
+ `wallet`, `project`, `task_config` come from the queue items built inside `fill_queue`'s `async with async_session()` — that session is closed, so they're **detached**. `wallet.failure_count += 1`, `wallet.status = "cooldown"`, and `increment_failure(db, project)` mutate detached objects; the worker's `db.commit()` writes nothing for them. Result: the wallet cooldown, project circuit breaker, and the autonomy engine's `failure_count >= 2` trigger **never fire**.
+ **Fix:** at the top of `_execute_task`: `wallet = await db.merge(wallet); project = await db.merge(project)` (or reload by id).
+ 
+-### C3. Nonce starts at 0 and is never synced from chain
++### ✅ C3. Nonce starts at 0 and is never synced from chain
+ `core/nonce_manager.py::get_nonce` creates `WalletNonce(nonce=0)`. Nothing calls `sync_nonce_from_chain` before use, so any wallet with on-chain history gets `nonce too low` on its first tx. Drift after dropped/replaced txs is also never corrected.
+ **Fix:** in `lock_nonce`, after locking, return `max(record.nonce, await w3.eth.get_transaction_count(addr, "pending"))` and store it.
+ 
+-### C4. "Emergency stop"/confirm flow on Telegram can never execute
++### ✅ C4. "Emergency stop"/confirm flow on Telegram can never execute
+ `telegram/bot.py`
+ - `dispatch_action()` re-stages any action in `_CONFIRM_REQUIRED` *every time it is called*. The `confirm` reply pops the pending action and calls `dispatch_action` again → hits the same `if action in _CONFIRM_REQUIRED` branch → asks for confirmation again. **`agent.kill`, `wallet.blacklist`, `chain.disable`, `nonce.release_all` can never run via Telegram.**
+ - `/agent_kill` isn't registered as a slash command at all.
+ - Handlers like `handle_wallet_pause`, `handle_task_pause`, `handle_project_disable/pause`, `handle_tx_cancel/speedup`, `handle_chain_disable` return "Reply 'confirm'" when `confirmation is None`, but `make_cmd` never passes `confirmation` and never stages a pending action — so those slash commands are also stuck.
+ **Fix:** add a `skip_confirm` param: `dispatch_action(..., confirmed=False)`; the `confirm` handler calls it with `confirmed=True`; in `make_cmd` stage a pending action when a handler returns a confirm prompt (or pass `confirmation="confirm"` after staging). Register `agent_kill`.
+ 
+-### C5. Dry-run still sends real approval transactions
++### ✅ C5. Dry-run still sends real approval transactions
+ `tasks/base.py::execute`
+ The dry-run gate is checked at step 16, but `handle_approval()` (a real `approve` broadcast) runs before it. Dry-run mode therefore spends gas and sets on-chain allowances.
+ **Fix:** `if is_dry_run() and needs_approval:` log + return `simulated` before calling `handle_approval()`.
+ 
+-### C6. Auto-started agent loop can't be stopped; `/agent/start` can double-start
++### ✅ C6. Auto-started agent loop can't be stopped; `/agent/start` can double-start
+ `main.py` does `asyncio.create_task(agent_loop())` without setting `agent.agent_task`, so `stop_agent()`/`/agent/stop`/kill's `stop_agent()` cancel nothing. Conversely `POST /agent/start` doesn't check `worker_pool.running` and spawns a **second** loop + second set of slot workers.
+ **Fix:** use `start_agent()` in `main.py`; guard `start_agent()` with `if agent_task and not agent_task.done(): return agent_task`.
+ 
+-### C7. Auth: refresh/device tokens are valid access tokens; refresh accepts access tokens
++### ✅ C7. Auth: refresh/device tokens are valid access tokens; refresh accepts access tokens
+ `security/auth.py`, `routes/auth.py`, `security/device_trust.py`
+ All JWTs share one key and `verify_token` never checks a `type` claim. So (a) a 7-day refresh token and the 30-day device-trust cookie JWT both work as Bearer access tokens, and (b) `/auth/refresh` accepts a plain access token, letting a stolen 30-min token be renewed forever. `/refresh` also takes the token as a **query param** (ends up in logs) and never checks the user still exists.
+ **Fix:** add `"type": "access"|"refresh"` to payloads; `decode_token(token, expected_type)`; take the refresh token in the body/cookie.
+ 
+-### C8. Empty `MASTER_PASSWORD` creates an admin with an empty password
++### ✅ C8. Empty `MASTER_PASSWORD` creates an admin with an empty password
+ `main.py` hashes `MASTER_PASSWORD` for the `admin` user, and `config.py` defaults it to `""`. The same value is also the encryption password for all private keys and the seed. `SECRET_KEY` also defaults to a known string.
+ **Fix:** refuse to start if `MASTER_PASSWORD` is empty/short or `SECRET_KEY == "please-change-me-in-production"`. Better: use a **separate** key-encryption secret from the login password.
+ 
+@@ -57,38 +89,38 @@ All JWTs share one key and `verify_token` never checks a `type` claim. So (a) a
+ 
+ ## 🟠 High
+ 
+-### H1. 2FA can be silently replaced with only a JWT
++### ✅ H1. 2FA can be silently replaced with only a JWT
+ `POST /auth/totp/setup` sets `totp_enabled=False` and a new secret with no TOTP/password check. Anyone with a (stolen) access token can call setup → verify-setup and own the second factor. **Fix:** if `totp_enabled`, require the current code (or password) before `/setup`.
+ 
+-### H2. Stats/gas/log data is mostly empty
++### ✅ H2. Stats/gas/log data is mostly empty
+ - `Transaction.gas_cost_usd`/`gas_token` are **never set** anywhere → gas reports, stats overview, daily summary, analyst trend flags, `achieve_volume`, and the `volume` criterion all read 0.
+ - `Log` rows are only written in the dry-run path, so the live WebSocket log, `send_daily_summary()` and log archival see nothing for real txs.
+ - `Transaction.error_message` is never set on failure.
+ **Fix:** after a receipt, compute `gas_used * effective_gas_price / 1e18 * price` and write it; add a `Log` row on every outcome.
+ 
+-### H3. Live log page shows heartbeat junk
++### ✅ H3. Live log page shows heartbeat junk
+ `ws.py` sends `{type, data}` envelopes (incl. a heartbeat every 2s). `Logs.jsx` does `setLogs(prev => [JSON.parse(e.data), ...])` — it inserts envelopes as rows (all columns undefined) and the 200-row cap fills with heartbeats. **Fix:** `const m = JSON.parse(e.data); if (m.type === 'log') ...`. Also `Dashboard.jsx`/`Logs.jsx` default WS port is `8000` but the server runs on `8002`. Also the WS replays from `Log.id > 0` on every connect.
+ 
+-### H4. Anti-Sybil "human behaviour" isn't actually applied
++### ◐ H4. Anti-Sybil "human behaviour" isn't actually applied
+ - `frequency_mins` and persona sleep times (`get_sleep_seconds`) are never used by the queue → a wallet burns its whole daily target back-to-back on 30s cycles.
+ - `delay_seconds` (start offset) is only `await asyncio.sleep`'d **after** `enqueue()` inside `fill_queue`, which just blocks the fill loop up to `30 × N` s and staggers nothing.
+ - `last_selected_at` is never updated, so the "least-recently-used" sort always picks the same wallets first.
+ - `randomize_amount()` ignores `WalletSettings.amount_*_override`/`amount_vary_daily` despite the comment.
+ **Fix:** track `next_run_at` per wallet+task (the `TaskSchedule` table exists and is unused) and honor it in `_get_project_candidates`.
+ 
+-### H5. Restart → mass failures
++### ✅ H5. Restart → mass failures
+ After a restart the master seed isn't loaded (`/agent_unlock` required), but the agent starts immediately. HD wallets then fail at signing (`No master seed set`), classified `unknown` → wallets to cooldown, projects circuit-broken. **Fix:** in `fill_queue`, skip HD wallets (or return early) while `get_master_seed()` is None, and alert once.
+ 
+-### H6. Private-key export API
++### ✅ H6. Private-key export API
+ `POST /agent/wallets/{id}/private-key` returns raw keys given a JWT + the master password (which is the same as the login password). One credential compromise = all keys. **Fix:** remove it, or require TOTP + separate secret + rate-limit; never return keys over the wire for HD wallets (the seed is recoverable offline).
+ 
+-### H7. Webhooks = SSRF + broken
++### ✅ H7. Webhooks = SSRF + broken
+ `routes/webhooks.py`: server POSTs to any user-supplied URL (no private-IP check — reuse `_assert_public_http_url`); `dispatch_event` declares `Depends(verify_token)` (will fail when called normally); IDs are list indexes so unregister shifts every ID and negative IDs pop from the end; errors swallowed. It's unused — **delete it or fix it**.
+ 
+-### H8. Wallet import fails with `0x` keys
++### ✅ H8. Wallet import fails with `0x` keys
+ `import_private_key` does `bytes.fromhex(private_key)` — the UI placeholder says `0x…` → `ValueError` → 500. Strip `0x`. Also validate length (64 hex).
+ 
+-### H9. Bad CoinGecko ids → no USD values
++### ✅ H9. Bad CoinGecko ids → no USD values
+ `balance.py` uses `chain.gas_token_symbol.lower()` (`"eth"`) as the CoinGecko id; CoinGecko needs `"ethereum"`. Add a `coingecko_id` column on `Chain` (tokens already have one). Also `check_erc20_balance_raw` passes DB addresses un-checksummed — web3 v7 raises on that; wrap in `to_checksum_address`.
+ 
+ ---
+@@ -104,7 +136,7 @@ After a restart the master seed isn't loaded (`/agent_unlock` required), but the
+ - **Eligibility has two inconsistent implementations.** `reports/eligibility.py` marks a criterion "met" if the wallet has *any* tx; `projects/eligibility.py` is the real one but uses `gas_cost_usd` as a volume proxy (always 0), a nonsense governance check, and treats `uncertain` social criteria as **met** (inverted). `SocialTask` tracking exists but isn't used. Consider showing "unverifiable" rather than a fake %.
+ - **Faucet cooldown counts failed requests.** `_do_request` blocks for `cooldown_hours` after *any* previous request, including `failed`. A transient faucet error then locks a wallet out for 24h. Filter `status == "success"` (as `cooldown_tracker.py` already does). Also "success" = HTTP 200, not "funds arrived" — verify with a balance check.
+ - **Brute-force uses `request.client.host`**, which is the tunnel/proxy IP behind Cloudflare, while the IP middleware uses `cf-connecting-ip`. All clients may share one lockout bucket (self-DoS). Also DB failures aren't cleared on success, so 5 old failures still lock a user after a good login. In-memory dict never pruned.
+-- **`/auth/login` timing** reveals whether a username exists (no hash check when user missing).
++- ✅ **`/auth/login` timing** (fixed) revealed whether a username exists (no hash check when user missing).
+ - **DB layer:** SQLite with many concurrent writers needs `connect_args={"timeout": 30}` / `busy_timeout`; `init_db` PRAGMAs break the documented Postgres path. Alembic `target_metadata = None`, so autogenerate is dead; new columns on existing tables (Phase 4) aren't applied by `create_all`. Set up Alembic properly.
+ - **`rpc_pool`:** cached web3 isn't invalidated when RPC URLs change; each `get_web3()` does an extra `block_number` call; `rpc_rate_limit_per_sec` / `get_rate_limiter` are never used; no request timeout on the provider.
+ - **Queue fill is O(wallets × tasks) DB queries every 30s**, plus commits in `get_or_create_daily_target`. Fine at 10 wallets, painful at 200. Batch with joins.
+@@ -130,21 +162,21 @@ After a restart the master seed isn't loaded (`/agent_unlock` required), but the
+ - `@app.on_event("startup")` is deprecated → use `lifespan`.
+ - Expose `health_score`/`sybil_risk_score` in `WalletResponse` (already noted in PLAN).
+ - Telegram `/agent_unlock <password>` leaves the password in chat history — auto-delete the message after reading.
+-- No tests/CI. At minimum add unit tests for: gas unit conversion, nonce lock/sync, `compare_outputs`, `classify_error_text`, `_do_change` bounds, `_project_is_dispatchable`.
++- Tests: five suites now exist (auth/secrets/2FA/import/fees/migration, kill-switch persistence, pacing, native gas, gas units/nonce/confirm flow); there is still no CI. Remaining gaps, the original list was: gas unit conversion, nonce lock/sync, `compare_outputs`, `classify_error_text`, `_do_change` bounds, `_project_is_dispatchable`.
+ 
+ ### Library-compat risks (*verify*)
+ - `signed.rawTransaction` → newer `eth-account` renamed it to `raw_transaction`.
+ - `tx_hash.hex()` with `hexbytes>=1.0` returns **no `0x` prefix**; those strings are then stored and passed back to `get_transaction_receipt` / compared. Use `w3.to_hex(tx_hash)`.
+ 
+ ### Ops / deployment
+-- Bind uvicorn to `127.0.0.1` behind the tunnel and/or firewall port 8002; the IP-whitelist middleware is commented out (PLAN already flags it), and `/docs` + `/openapi.json` are public.
++- Bind uvicorn to `127.0.0.1` behind the tunnel and/or firewall port 8002; the IP-whitelist middleware is commented out **on purpose (decision: leave it)**, so `/docs` + `/openapi.json` are public.
+ - Harden the systemd unit (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths=` for the DB, `PrivateTmp=yes`) and `chmod 600 .env`.
+-- Persist emergency-stop and dry-run (already in "Known, not built") — until then a restart can silently go live.
+-- Add a one-click **Kill** button on the dashboard (only `/agent/kill` API exists) since the Telegram path is broken (C4).
++- ✅ Persist emergency-stop and dry-run: done in Phase 11 (a restart no longer silently goes live).
++- ✅ One-click **Kill** button: present on the dashboard System panel; the Telegram path is fixed (C4).
+ 
+ ---
+ 
+-## Suggested fix order
++## Suggested fix order (original; steps 1-5 are done)
+ 1. C1 (gas units) → C2 (merge detached objects) → C3 (nonce sync) → C5 (dry-run approvals) — the engine can't work without these.
+ 2. C4/C6 (kill + stop controls) — safety controls must actually work.
+ 3. C7/C8/H1/H6 — auth & secrets.
+diff --git a/backend/api/routes/ops.py b/backend/api/routes/ops.py
+index 163ea91..11a0bea 100644
+--- a/backend/api/routes/ops.py
++++ b/backend/api/routes/ops.py
+@@ -33,7 +33,7 @@ from backend.wallet.hd_generator import get_master_seed
+ from backend.chains.manager import get_chain
+ from backend.core.nonce_manager import release_nonce, sync_nonce_from_chain
+ from backend.core.kill_switch import (
+-    is_emergency_stop, is_dry_run, set_dry_run, deactivate_kill_switch, is_ai_autonomy_paused,
++    is_emergency_stop, is_dry_run, set_dry_run_persistent, deactivate_kill_switch, is_ai_autonomy_paused,
+ )
+ 
+ router = APIRouter(prefix="/ops", tags=["ops"])
+@@ -368,11 +368,12 @@ async def system_state(_user: dict = Depends(verify_token)):
+ 
+ 
+ @router.post("/system/dry-run")
+-async def system_dry_run(data: DryRunRequest, _user: dict = Depends(verify_token)):
++async def system_dry_run(data: DryRunRequest, _user: dict = Depends(verify_token),
++                         db: AsyncSession = Depends(get_db)):
+     """Global dry-run toggle (replaces the old per-task dry-run command).
+-    In-memory, like the emergency stop: resets to OFF on restart (kill_switch does
+-    not read the DRY_RUN_MODE env value — see PLAN 'Known, not built')."""
+-    set_dry_run(data.enabled)
++    Persisted: it survives restarts. DRY_RUN_MODE=true in the environment additionally forces
++    it ON at every boot (it can never force it off)."""
++    await set_dry_run_persistent(db, data.enabled, by="dashboard")
+     return _system_state()
+ 
+ 
+diff --git a/backend/api/routes/stats.py b/backend/api/routes/stats.py
+index a2b2a24..fc220de 100644
+--- a/backend/api/routes/stats.py
++++ b/backend/api/routes/stats.py
+@@ -13,6 +13,8 @@ from backend.database import get_db
+ from backend.security.auth import verify_token
+ from backend.models import Project, Wallet, TaskConfig, Transaction, Alert
+ 
++from backend.reports.gas_native import gas_native_totals, format_gas_native
++
+ router = APIRouter(prefix="/stats", tags=["stats"])
+ 
+ 
+@@ -31,9 +33,13 @@ async def _tx_stats(db: AsyncSession, since=None) -> dict:
+         stmt = stmt.where(Transaction.created_at >= since)
+     total, ok, failed, gas = (await db.execute(stmt)).one()
+     ok, failed = int(ok or 0), int(failed or 0)
++    native = await gas_native_totals(db, since=since)
+     return {
+         "total": int(total or 0), "confirmed": ok, "failed": failed,
+         "gas_usd": round(float(gas or 0), 2),
++        # factual per-token gas (USD above is an estimate and meaningless on testnets)
++        "gas_native": {k: round(v, 8) for k, v in native.items()},
++        "gas_native_text": format_gas_native(native),
+         "success_rate": round(ok / (ok + failed) * 100, 1) if (ok + failed) else None,
+     }
+ 
+@@ -83,6 +89,17 @@ async def overview(_user: dict = Depends(verify_token), db: AsyncSession = Depen
+             .group_by(TaskConfig.project_id)
+         )).all()
+     }
++    native_rows = (await db.execute(
++        select(TaskConfig.project_id, Transaction.gas_token, func.sum(Transaction.gas_cost_native))
++        .select_from(Transaction)
++        .join(TaskConfig, Transaction.task_config_id == TaskConfig.id)
++        .where(Transaction.gas_cost_native.is_not(None))
++        .group_by(TaskConfig.project_id, Transaction.gas_token)
++    )).all()
++    native_by_project: dict = {}
++    for pid, sym, total in native_rows:
++        if total:
++            native_by_project.setdefault(pid, {})[sym or "?"] = float(total)
+     per_project = []
+     for p in projects:
+         t_total, t_enabled = task_rows.get(p.id, (0, 0))
+@@ -96,6 +113,8 @@ async def overview(_user: dict = Depends(verify_token), db: AsyncSession = Depen
+             "tx_confirmed": int(r[2]) if r else 0,
+             "tx_failed": int(r[3]) if r else 0,
+             "gas_usd": round(float(r[4] or 0), 2) if r else 0.0,
++            "gas_native": {k: round(v, 8) for k, v in native_by_project.get(p.id, {}).items()},
++            "gas_native_text": format_gas_native(native_by_project.get(p.id, {})),
+             "wallets": int(r[5]) if r else 0,
+             "active_days": int(r[6]) if r else 0,
+             "last_tx_at": r[7].isoformat() if r and r[7] else None,
+diff --git a/backend/core/kill_switch.py b/backend/core/kill_switch.py
+index f359b49..b3c4bae 100644
+--- a/backend/core/kill_switch.py
++++ b/backend/core/kill_switch.py
+@@ -1,6 +1,41 @@
++import logging
++from datetime import datetime
+ from typing import Optional
+-from backend.models import AgentStatus
++
++from sqlalchemy import Boolean, DateTime, Integer, Text
+ from sqlalchemy.ext.asyncio import AsyncSession
++from sqlalchemy.orm import Mapped, mapped_column
++
++from backend.database import Base, async_session
++from backend.models import AgentStatus
++
++logger = logging.getLogger("airdrop.kill_switch")
++
++
++class KillSwitchState(Base):
++    """Single-row (id=1) persistence for the emergency stop and the global dry-run flag.
++
++    Both used to live only in process memory, so a crash or redeploy silently turned the
++    agent back to live trading with dry-run off. They are now restored at startup
++    (see load_kill_switch_state) and written on every change."""
++    __tablename__ = "kill_switch_state"
++    id: Mapped[int] = mapped_column(Integer, primary_key=True)
++    emergency_stop: Mapped[bool] = mapped_column(Boolean, default=False)
++    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
++    updated_by: Mapped[Optional[str]] = mapped_column(Text)
++    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
++
++
++async def _persist(db: AsyncSession, by: str, **fields) -> None:
++    """Upsert the single state row. Does NOT commit: callers commit with their own changes."""
++    row = await db.get(KillSwitchState, 1)
++    if row is None:
++        row = KillSwitchState(id=1, emergency_stop=False, dry_run=False)
++        db.add(row)
++    for k, v in fields.items():
++        setattr(row, k, bool(v))
++    row.updated_by = by[:200]
++    row.updated_at = datetime.utcnow()
+ 
+ # Module-level state — mutated in place; callers MUST use is_emergency_stop()
+ # instead of importing the raw name to get the live value.
+@@ -46,20 +81,64 @@ def set_dry_run(value: bool) -> None:
+ 
+ 
+ async def activate_kill_switch(db: AsyncSession, reason: str = "manual"):
++    """Emergency stop. Persisted: it stays active across a restart until explicitly cleared."""
+     global _EMERGENCY_STOP, EMERGENCY_STOP
+     _EMERGENCY_STOP = True
+     EMERGENCY_STOP = True
+     status = await db.get(AgentStatus, 1)
+     if status:
+         status.status = "stopped"
+-        await db.commit()
++    await _persist(db, reason, emergency_stop=True)
++    await db.commit()
+ 
+ 
+-async def deactivate_kill_switch(db: AsyncSession):
++async def deactivate_kill_switch(db: AsyncSession, by: str = "manual clear"):
+     global _EMERGENCY_STOP, EMERGENCY_STOP
+     _EMERGENCY_STOP = False
+     EMERGENCY_STOP = False
+     status = await db.get(AgentStatus, 1)
+     if status:
+         status.status = "running"
+-        await db.commit()
++    await _persist(db, by, emergency_stop=False)
++    await db.commit()
++
++
++async def set_dry_run_persistent(db: AsyncSession, value: bool, by: str = "manual") -> None:
++    """Set the global dry-run flag AND persist it (use this instead of set_dry_run in handlers)."""
++    set_dry_run(value)
++    await _persist(db, by, dry_run=value)
++    await db.commit()
++
++
++async def load_kill_switch_state(env_dry_run: bool = False) -> None:
++    """Call once at startup, after init_db() and BEFORE the scheduler/agent loop start.
++
++    Emergency stop: restored exactly as saved.
++    Dry-run: ON if it was saved ON **or** DRY_RUN_MODE=true in the environment. The env value
++    can therefore only force dry-run on at boot, never off; to run live permanently set
++    DRY_RUN_MODE=false and switch dry-run off in the dashboard (that choice is then saved).
++    """
++    try:
++        async with async_session() as db:
++            row = await db.get(KillSwitchState, 1)
++            emergency = bool(row and row.emergency_stop)
++            dry = bool(row and row.dry_run) or bool(env_dry_run)
++            global _EMERGENCY_STOP, EMERGENCY_STOP
++            _EMERGENCY_STOP = emergency
++            EMERGENCY_STOP = emergency
++            set_dry_run(dry)
++            if dry and not (row and row.dry_run):
++                await _persist(db, "env DRY_RUN_MODE", dry_run=True)
++                await db.commit()
++            if emergency:
++                logger.warning("EMERGENCY STOP is ACTIVE (restored from DB). Nothing will run until it is "
++                               "cleared (dashboard System panel or /agent_resume_all).")
++            if dry:
++                logger.warning("DRY-RUN is ON (%s). No transactions will be broadcast.",
++                               "saved state" if (row and row.dry_run) else "DRY_RUN_MODE env")
++    except Exception as e:
++        # Fail SAFE: if the state cannot be read, do not go live.
++        logger.error("load_kill_switch_state failed (%s): starting in emergency stop + dry-run", e)
++        _EMERGENCY_STOP = True
++        EMERGENCY_STOP = True
++        set_dry_run(True)
+diff --git a/backend/core/queue_manager.py b/backend/core/queue_manager.py
+index 0430ca0..32ce0f6 100644
+--- a/backend/core/queue_manager.py
++++ b/backend/core/queue_manager.py
+@@ -13,7 +13,8 @@ from backend.projects.manager import list_task_configs
+ from backend.wallet.manager import list_wallets, get_wallet_settings
+ from backend.chains.manager import get_chain
+ from backend.core.daily_targets import get_or_create_daily_target
+-from backend.wallet.behavior_randomizer import is_in_active_hours, get_start_offset_seconds
++from backend.wallet.behavior_randomizer import is_in_active_hours, has_started_for_the_day
++from backend.core.scheduling import load_schedule_map, utcnow_naive
+ 
+ logger = logging.getLogger("airdrop.queue_manager")
+ 
+@@ -92,6 +93,7 @@ async def fill_queue(worker_pool) -> None:
+         # Proportional fill: allocate slots to projects by weight
+         to_enqueue = []
+         remaining = free_slots
++        chosen_wallets = set()   # one task per wallet per fill, even across projects
+ 
+         for proj_id, bucket in project_buckets.items():
+             if remaining <= 0:
+@@ -100,24 +102,28 @@ async def fill_queue(worker_pool) -> None:
+             allocation = max(1, round(bucket["weight"] * free_slots))
+             allocation = min(allocation, bucket["cap"], remaining, len(bucket["candidates"]))
+ 
+-            selected = bucket["candidates"][:allocation]
++            selected = []
++            for cand in bucket["candidates"]:
++                if len(selected) >= allocation:
++                    break
++                if cand["wallet"].id in chosen_wallets:
++                    continue
++                selected.append(cand)
++                chosen_wallets.add(cand["wallet"].id)
+             to_enqueue.extend(selected)
+             remaining -= len(selected)
+ 
+         # Randomize order within selections to avoid pattern
+         random.shuffle(to_enqueue)
+         if to_enqueue:
++            # Record the selection so least-recently-used ordering actually rotates wallets
++            # (last_selected_at was never written before). These wallet objects belong to `db`.
++            now = utcnow_naive()
++            for item in to_enqueue:
++                item["wallet"].last_selected_at = now
++            await db.commit()
+             await worker_pool.enqueue(to_enqueue)
+             logger.info(f"Enqueued {len(to_enqueue)} tasks across {len(project_buckets)} projects")
+-            # Apply wall-clock stagger delays so wallets don't all fire at once.
+-            # We schedule each item's actual execution delay via a tiny wrapper
+-            # that sleeps offset_secs before making the slot visible to workers.
+-            # Simplest safe approach: sleep proportional to queue position so
+-            # enqueued items spread out naturally without needing extra tasks.
+-            for i, item in enumerate(to_enqueue):
+-                delay = item.get("delay_seconds", 0)
+-                if delay and i > 0:
+-                    await asyncio.sleep(min(delay, 30))  # cap at 30 s per item
+ 
+ 
+ async def _get_project_candidates(db: AsyncSession, project: Project, worker_pool) -> list:
+@@ -146,7 +152,11 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
+         return []
+ 
+     candidates = []
+-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
++    now_utc = datetime.now(timezone.utc)
++    now_naive = utcnow_naive()
++    today_str = now_utc.strftime("%Y-%m-%d")
++    # H4: when each (wallet, task) is next due, loaded once for the whole project.
++    schedule = await load_schedule_map(db, [t.id for t in enabled_tasks])
+ 
+     for wallet in wallets:
+         settings = await get_wallet_settings(db, wallet.id)
+@@ -155,6 +165,13 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
+         if not is_in_active_hours(settings):
+             continue
+ 
++        # H4: wallet "sleep" between any two tasks, and the personal start offset after the
++        # active window opens (so wallets sharing a window don't all fire in the first cycle).
++        if wallet.next_available_at and wallet.next_available_at > now_naive:
++            continue
++        if not has_started_for_the_day(settings, wallet.id, now_utc):
++            continue
++
+         # Check if wallet already has active task on any chain
+         active_count_result = await db.execute(
+             select(func.count()).select_from(ActiveTask).where(ActiveTask.wallet_id == wallet.id)
+@@ -167,6 +184,11 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
+             if await _has_active_task(db, wallet.id, task_config.chain_id):
+                 continue
+ 
++            # H4: this task ran (or was deferred) recently; honour frequency_mins / backoff.
++            due = schedule.get((wallet.id, task_config.id))
++            if due is not None and due > now_naive:
++                continue
++
+             # Check chain is enabled
+             chain = await get_chain(db, task_config.chain_id)
+             if not chain or not chain.enabled:
+@@ -185,23 +207,23 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
+                 if not deps_met:
+                     continue
+ 
+-            # Calculate staggered start offset
+-            offset_secs = get_start_offset_seconds(settings)
+-
+             candidates.append({
+                 "wallet": wallet,
+                 "task_config": task_config,
+                 "project": project,
+                 "chain": chain,
+                 "priority": project.priority,
+-                "delay_seconds": offset_secs,
+             })
+ 
+-    # Sort: least-recently-used wallets first, then by start delay
+-    candidates.sort(key=lambda x: (
+-        x["wallet"].last_selected_at or datetime.min.replace(tzinfo=timezone.utc),
+-        x["delay_seconds"],
+-    ))
++    # One candidate per wallet (a random one of its due tasks): a wallet must not be handed two
++    # actions in the same cycle, which would bypass the sleep rule above.
++    by_wallet = {}
++    for c in candidates:
++        by_wallet.setdefault(c["wallet"].id, []).append(c)
++    candidates = [random.choice(v) for v in by_wallet.values()]
++
++    # Sort: least-recently-selected wallets first (never-selected first); random tiebreak.
++    candidates.sort(key=lambda x: (x["wallet"].last_selected_at or datetime.min, random.random()))
+     return candidates
+ 
+ 
+diff --git a/backend/core/scheduling.py b/backend/core/scheduling.py
+new file mode 100644
+index 0000000..3e9bde1
+--- /dev/null
++++ b/backend/core/scheduling.py
+@@ -0,0 +1,101 @@
++"""
++Human-like pacing (review item H4).
++
++Before this module, frequency_mins, the persona's sleep range and start offset were stored and
++shown in the UI but never enforced: a wallet that finished a task was eligible again on the very
++next 30 s queue cycle and ran until its daily target was hit, a burst no person produces.
++
++Rules now enforced in queue_manager._get_project_candidates:
++  * per (wallet, task): TaskSchedule.next_run_at. After an attempt the task is not due again until
++        success  -> frequency_mins x U(0.8, 1.4)
++        failed   -> ~10 min x U(0.8, 1.5)   (timeouts and config errors count as failed)
++        skipped  -> U(3, 8) min             (gas spike, low gas, paused contract, memory pressure)
++  * per wallet: Wallet.next_available_at = now + U(sleep_min_mins, sleep_max_mins) after any attempt,
++        so a wallet never does two things back to back.
++  * per wallet per day: no task until the active window opened + a deterministic personal offset
++        in [0, start_offset_max_mins] (see behavior_randomizer.has_started_for_the_day).
++  * one task per wallet per queue fill (a wallet with tasks on two chains used to get both at once).
++Dry-run ("simulated") results never touch the schedule.
++"""
++import logging
++import random
++from datetime import datetime, timedelta, timezone
++from typing import Optional
++
++from sqlalchemy import select
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from backend.models import TaskSchedule, Wallet
++from backend.wallet.manager import get_wallet_settings
++from backend.wallet.behavior_randomizer import get_sleep_seconds
++
++logger = logging.getLogger("airdrop.scheduling")
++
++DEFAULT_FREQUENCY_MINS = 120
++SUCCESS_JITTER = (0.8, 1.4)
++FAILURE_BACKOFF_MINS = 10
++FAILURE_JITTER = (0.8, 1.5)
++SKIP_BACKOFF_MINS = (3.0, 8.0)
++OUTCOMES = ("success", "failed", "skipped")
++
++
++def utcnow_naive() -> datetime:
++    """The DateTime columns are naive UTC; keep every comparison in that one convention."""
++    return datetime.now(timezone.utc).replace(tzinfo=None)
++
++
++def task_delay_minutes(outcome: str, frequency_mins: Optional[int], rng=random) -> float:
++    """Minutes until the same (wallet, task) may run again."""
++    if outcome == "success":
++        freq = max(1, int(frequency_mins or DEFAULT_FREQUENCY_MINS))
++        return freq * rng.uniform(*SUCCESS_JITTER)
++    if outcome == "failed":
++        return FAILURE_BACKOFF_MINS * rng.uniform(*FAILURE_JITTER)
++    if outcome == "skipped":
++        return rng.uniform(*SKIP_BACKOFF_MINS)
++    raise ValueError(f"unknown outcome {outcome!r}")
++
++
++async def record_attempt(db: AsyncSession, wallet_id: int, task_config, outcome: str,
++                         now: Optional[datetime] = None) -> None:
++    """Update TaskSchedule (upsert) and Wallet.next_available_at after a real attempt.
++    Never raises: pacing bookkeeping must not break outcome handling."""
++    if outcome not in OUTCOMES:
++        return
++    try:
++        now = now or utcnow_naive()
++        settings = await get_wallet_settings(db, wallet_id)
++        next_run = now + timedelta(minutes=task_delay_minutes(outcome, task_config.frequency_mins))
++        row = (await db.execute(
++            select(TaskSchedule).where(TaskSchedule.wallet_id == wallet_id,
++                                       TaskSchedule.task_config_id == task_config.id)
++        )).scalar_one_or_none()
++        if row is None:
++            db.add(TaskSchedule(wallet_id=wallet_id, task_config_id=task_config.id,
++                                next_run_at=next_run, last_run_at=now, enabled=True, priority=5))
++        else:
++            row.next_run_at = next_run
++            row.last_run_at = now
++        wallet = await db.get(Wallet, wallet_id)
++        if wallet is not None:
++            wallet.next_available_at = now + timedelta(seconds=get_sleep_seconds(settings))
++            if outcome == "success":
++                wallet.last_active = now
++        await db.commit()
++    except Exception as e:
++        logger.warning("record_attempt failed for wallet=%s task=%s: %s", wallet_id,
++                       getattr(task_config, "id", "?"), e)
++        try:
++            await db.rollback()
++        except Exception:
++            pass
++
++
++async def load_schedule_map(db: AsyncSession, task_config_ids: list) -> dict:
++    """{(wallet_id, task_config_id): next_run_at} for the given task configs, in ONE query."""
++    if not task_config_ids:
++        return {}
++    rows = (await db.execute(
++        select(TaskSchedule).where(TaskSchedule.task_config_id.in_(task_config_ids))
++    )).scalars().all()
++    return {(r.wallet_id, r.task_config_id): r.next_run_at for r in rows}
+diff --git a/backend/core/worker_pool.py b/backend/core/worker_pool.py
+index 14054c0..e8a38cc 100644
+--- a/backend/core/worker_pool.py
++++ b/backend/core/worker_pool.py
+@@ -22,6 +22,7 @@ from backend.wallet.balance import get_gas_token_balance
+ from backend.core.gas_spike_guard import check_gas_spike
+ from backend.core.memory_guard import is_memory_critical
+ from backend.core.failure_analysis import classify_result, classify_error_text, record_failure
++from backend.core.scheduling import record_attempt
+ 
+ from backend.tasks.swap import SwapTask
+ from backend.tasks.generic import InteractContractTask
+@@ -169,6 +170,7 @@ class WorkerPool:
+                 async with self.lock:
+                     self.active_task_ids.discard(key)
+                 await _record("skipped", "memory_pressure", "memory critical, dispatch paused")
++                await record_attempt(db, wallet.id, task_config, "skipped")
+                 return
+ 
+             # Gas spike guard — same cleanup before early return (fix 3.2)
+@@ -179,6 +181,7 @@ class WorkerPool:
+                 async with self.lock:
+                     self.active_task_ids.discard(key)
+                 await _record("skipped", "gas_spike", "gas price above spike threshold, task deferred")
++                await record_attempt(db, wallet.id, task_config, "skipped")
+                 return
+ 
+             # Build the correct task class
+@@ -190,6 +193,7 @@ class WorkerPool:
+                 async with self.lock:
+                     self.active_task_ids.discard(key)
+                 await _record("failed", "config_error", f"No handler for task type {task_config.task_type}")
++                await record_attempt(db, wallet.id, task_config, "failed")
+                 return
+ 
+             task_instance = task_cls(task_config, wallet, chain, project, db)
+@@ -227,6 +231,9 @@ class WorkerPool:
+                     await _record("skipped", category, reason)
+                 # any other status (e.g. "simulated" in dry-run): no counters
+                 await db.commit()
++                # H4: pace the next attempt (dry-run "simulated" results are not recorded)
++                if status in ("success", "failed", "skipped"):
++                    await record_attempt(db, wallet.id, task_config, status)
+                 if log_entry:
+                     await _log(*log_entry)
+             except asyncio.TimeoutError:
+@@ -236,6 +243,7 @@ class WorkerPool:
+                 from backend.projects.circuit_breaker import increment_failure
+                 await increment_failure(db, project)
+                 await _record("failed", "task_timeout", "task exceeded the 8 minute limit")
++                await record_attempt(db, wallet.id, task_config, "failed")
+                 await _log("failed", error="task exceeded the 8 minute limit")
+             except Exception as e:
+                 logger.error(f"Task execution error: {e}")
+@@ -243,6 +251,7 @@ class WorkerPool:
+                 from backend.projects.circuit_breaker import increment_failure
+                 await increment_failure(db, project)
+                 await _record("failed", classify_error_text(str(e)), str(e))
++                await record_attempt(db, wallet.id, task_config, "failed")
+                 await _log("failed", error=str(e))
+             finally:
+                 # Always remove active task row and in-memory key (fixes 3.1 and 3.2)
+diff --git a/backend/main.py b/backend/main.py
+index ba8de1a..783f597 100644
+--- a/backend/main.py
++++ b/backend/main.py
+@@ -3,13 +3,14 @@ from fastapi import FastAPI
+ from fastapi.middleware.cors import CORSMiddleware
+ from backend.api.routes import auth, agent, ws, chains, wallets, faucets, projects, ai, reports, autonomy, ops, stats, proxies, claims
+ from backend.database import init_db, async_session
+-from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD, SECRET_KEY, ALLOW_INSECURE_SECRETS
++from backend.config import SERVER_HOST, SERVER_PORT, LOG_LEVEL, MASTER_PASSWORD, SECRET_KEY, ALLOW_INSECURE_SECRETS, DRY_RUN_MODE
+ from sqlalchemy import select
+ from backend.models import User
+ from backend.security.auth import get_password_hash
+ from backend.security.startup_checks import enforce_startup_secrets
+ import backend.telegram.topics  # noqa: F401  (registers telegram_routes table before init_db)
+ import backend.core.autonomy_models  # noqa: F401  (registers ai_actions tables before init_db)
++import backend.core.kill_switch  # noqa: F401  (registers kill_switch_state table before init_db)
+ import uvicorn
+ 
+ app = FastAPI(title="Airdrop Agent", version="0.1.0")
+@@ -54,6 +55,11 @@ async def startup():
+             session.add(User(username="admin", hashed_password=get_password_hash(MASTER_PASSWORD)))
+             await session.commit()
+ 
++    # Restore the emergency stop and dry-run flags BEFORE anything can dispatch work, so a
++    # restart can never silently turn a stopped or dry-run agent back to live.
++    from backend.core.kill_switch import load_kill_switch_state
++    await load_kill_switch_state(env_dry_run=DRY_RUN_MODE)
++
+     # Phase 6: restore the persisted AI-autonomy freeze flag BEFORE the
+     # scheduler starts, so a restart can never silently re-enable autonomy.
+     from backend.core.autonomy import load_autonomy_state
+diff --git a/backend/models.py b/backend/models.py
+index 6ed1c56..89365a8 100644
+--- a/backend/models.py
++++ b/backend/models.py
+@@ -111,6 +111,8 @@ class Wallet(Base):
+     failure_count: Mapped[int] = mapped_column(Integer, default=0)
+     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime)
+     last_selected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
++    # Wallet-level "sleep": no new task is dispatched for this wallet before this time (naive UTC).
++    next_available_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+     warmup_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+     warmup_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+     sybil_risk_score: Mapped[int] = mapped_column(Integer, default=0)
+diff --git a/backend/reports/analyst.py b/backend/reports/analyst.py
+index a3cce6b..4ba5596 100644
+--- a/backend/reports/analyst.py
++++ b/backend/reports/analyst.py
+@@ -26,6 +26,7 @@ Instead:
+ import logging
+ from datetime import datetime, timedelta, timezone
+ from typing import Optional
++from backend.reports.gas_native import gas_native_totals, format_gas_native
+ 
+ from sqlalchemy.ext.asyncio import AsyncSession
+ from sqlalchemy import select, func
+@@ -61,7 +62,9 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
+     recent_total = len(recent_txs)
+     recent_failed = sum(1 for t in recent_txs if t.status == "failed")
+     recent_confirmed = sum(1 for t in recent_txs if t.status == "confirmed")
+-    recent_gas_usd = sum(t.gas_cost_usd or 0 for t in recent_txs if t.status == "confirmed")
++    # Gas is reported in each chain's own token (USD is meaningless on testnets and empty
++    # whenever the price lookup fails); totals are per token, never summed across tokens.
++    recent_gas = await gas_native_totals(db, since=since)
+     recent_failure_rate = (recent_failed / recent_total) if recent_total else 0.0
+ 
+     # 7-day baseline (excludes the most recent window itself)
+@@ -74,9 +77,8 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
+     baseline_days = 7
+     baseline_total = len(baseline_txs)
+     baseline_failed = sum(1 for t in baseline_txs if t.status == "failed")
+-    baseline_gas_usd = sum(t.gas_cost_usd or 0 for t in baseline_txs if t.status == "confirmed")
++    baseline_gas = await gas_native_totals(db, since=baseline_since, until=since)
+     baseline_failure_rate = (baseline_failed / baseline_total) if baseline_total else 0.0
+-    baseline_avg_daily_gas = (baseline_gas_usd / baseline_days) if baseline_days else 0.0
+ 
+     # Failure reasons (top clusters in the recent window)
+     reason_counts: dict = {}
+@@ -118,7 +120,8 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
+         "tx_confirmed": recent_confirmed,
+         "tx_failed": recent_failed,
+         "failure_rate_pct": round(recent_failure_rate * 100, 1),
+-        "gas_spent_usd": round(recent_gas_usd, 2),
++        "gas_spent": format_gas_native(recent_gas),
++        "gas_spent_native": {k: round(v, 8) for k, v in recent_gas.items()},
+         "top_failure_reasons": [{"reason": r, "count": c} for r, c in top_failures],
+         "daily_target_shortfalls": shortfalls[:20],
+         "shortfall_count": len(shortfalls),
+@@ -136,13 +139,14 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
+                 f"Failure rate is up {delta*100:.1f} percentage points vs the "
+                 f"7-day baseline ({recent_failure_rate*100:.1f}% vs {baseline_failure_rate*100:.1f}%)."
+             )
+-    if baseline_avg_daily_gas > 0:
+-        window_days = max(hours / 24, 0.01)
+-        recent_daily_gas = recent_gas_usd / window_days
+-        if recent_daily_gas >= baseline_avg_daily_gas * GAS_COST_FLAG_MULTIPLIER:
++    window_days = max(hours / 24, 0.01)
++    for sym, base_total in baseline_gas.items():
++        base_daily = base_total / baseline_days
++        recent_daily = recent_gas.get(sym, 0.0) / window_days
++        if base_daily > 0 and recent_daily >= base_daily * GAS_COST_FLAG_MULTIPLIER:
+             flags.append(
+-                f"Gas spend is running at ~${recent_daily_gas:.2f}/day, "
+-                f"{recent_daily_gas / baseline_avg_daily_gas:.1f}x the 7-day average of ${baseline_avg_daily_gas:.2f}/day."
++                f"{sym} gas spend is running at ~{recent_daily:.6g} {sym}/day, "
++                f"{recent_daily / base_daily:.1f}x the 7-day average of {base_daily:.6g} {sym}/day."
+             )
+     facts["trend_flags"] = flags
+     return facts
+@@ -235,7 +239,7 @@ def format_plain_fallback(facts: dict) -> str:
+     lines = [
+         f"Txs: {facts['tx_total']} total, {facts['tx_confirmed']} confirmed, "
+         f"{facts['tx_failed']} failed ({facts['failure_rate_pct']}% failure rate).",
+-        f"Gas spent: ${facts['gas_spent_usd']}.",
++        f"Gas spent: {facts['gas_spent']}.",
+     ]
+     if facts["shortfall_count"]:
+         lines.append(f"{facts['shortfall_count']} wallet/task targets behind today.")
+diff --git a/backend/reports/gas.py b/backend/reports/gas.py
+index 48413bc..7ccf307 100644
+--- a/backend/reports/gas.py
++++ b/backend/reports/gas.py
+@@ -2,19 +2,30 @@ from sqlalchemy.ext.asyncio import AsyncSession
+ from sqlalchemy import select, func
+ from backend.models import Transaction, Wallet, Chain
+ 
++
+ async def get_gas_usage_report(db: AsyncSession, chain_id: int = None):
++    """Gas per wallet per chain. `total_gas_native` / `gas_token` are factual (fee paid, in the
++    chain's gas token, including reverted transactions); `total_gas_usd` is a price estimate
++    that is meaningless on testnets (confirmed transactions only, as before)."""
+     stmt = select(
+         Wallet.address,
+         Chain.name.label("chain"),
++        Chain.gas_token_symbol.label("gas_token"),
+         func.sum(Transaction.gas_cost_usd).label("total_usd"),
+-        func.count(Transaction.id).label("tx_count")
++        func.sum(Transaction.gas_cost_native).label("total_native"),
++        func.count(Transaction.id).label("tx_count"),
+     ).join(Chain, Transaction.chain_id == Chain.id)\
+      .join(Wallet, Transaction.wallet_id == Wallet.id)\
+-     .where(Transaction.status == 'confirmed')
++     .where(Transaction.status.in_(["confirmed", "failed"]), Transaction.gas_cost_native.is_not(None))
+ 
+     if chain_id:
+         stmt = stmt.where(Chain.id == chain_id)
+ 
+-    stmt = stmt.group_by(Wallet.address, Chain.name)
++    stmt = stmt.group_by(Wallet.address, Chain.name, Chain.gas_token_symbol)
+     result = await db.execute(stmt)
+-    return [{"wallet": r.address, "chain": r.chain, "total_gas_usd": round(r.total_usd or 0, 2), "tx_count": r.tx_count} for r in result.all()]
++    return [{
++        "wallet": r.address, "chain": r.chain, "gas_token": r.gas_token,
++        "total_gas_native": round(r.total_native or 0.0, 8),
++        "total_gas_usd": round(r.total_usd or 0, 2),
++        "tx_count": r.tx_count,
++    } for r in result.all()]
+diff --git a/backend/reports/gas_native.py b/backend/reports/gas_native.py
+new file mode 100644
+index 0000000..c5dadd2
+--- /dev/null
++++ b/backend/reports/gas_native.py
+@@ -0,0 +1,60 @@
++"""
++Factual gas reporting in the chain's own gas token (ROADMAP item 3).
++
++gas_cost_usd prices a testnet token at its MAINNET value, which is meaningless, and it is empty
++whenever the price lookup fails. gas_cost_native (fee actually paid, in gas-token units) is always
++recorded. Totals are kept PER TOKEN because adding ETH to BNB is not a number.
++
++"Gas spent" here counts every transaction that has a recorded fee, including ones that reverted
++on-chain (a revert still burns gas). Transactions recorded before fee tracking existed have no fee
++and are simply not counted.
++"""
++from datetime import datetime
++from typing import Dict, Optional
++
++from sqlalchemy import select, func
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from backend.models import Transaction, TaskConfig
++
++
++async def gas_native_totals(
++    db: AsyncSession,
++    since: Optional[datetime] = None,
++    until: Optional[datetime] = None,
++    wallet_id: Optional[int] = None,
++    project_id: Optional[int] = None,
++) -> Dict[str, float]:
++    """{gas token symbol: total fee paid} for the given filters."""
++    stmt = (
++        select(Transaction.gas_token, func.sum(Transaction.gas_cost_native))
++        .where(Transaction.gas_cost_native.is_not(None))
++        .group_by(Transaction.gas_token)
++    )
++    if since is not None:
++        stmt = stmt.where(Transaction.created_at >= since)
++    if until is not None:
++        stmt = stmt.where(Transaction.created_at < until)
++    if wallet_id is not None:
++        stmt = stmt.where(Transaction.wallet_id == wallet_id)
++    if project_id is not None:
++        stmt = stmt.join(TaskConfig, Transaction.task_config_id == TaskConfig.id).where(
++            TaskConfig.project_id == project_id)
++    rows = (await db.execute(stmt)).all()
++    return {(sym or "?"): float(total or 0.0) for sym, total in rows if total}
++
++
++def merge_totals(*parts: Dict[str, float]) -> Dict[str, float]:
++    out: Dict[str, float] = {}
++    for p in parts:
++        for k, v in (p or {}).items():
++            out[k] = out.get(k, 0.0) + v
++    return out
++
++
++def format_gas_native(totals: Dict[str, float]) -> str:
++    """'0.00123 ETH · 0.0004 BNB', largest first; 'none recorded' when empty."""
++    if not totals:
++        return "none recorded"
++    parts = sorted(totals.items(), key=lambda kv: -kv[1])
++    return " · ".join(f"{v:.6g} {sym}" for sym, v in parts)
+diff --git a/backend/reports/gas_spend.py b/backend/reports/gas_spend.py
+index 6266a9c..2acdd53 100644
+--- a/backend/reports/gas_spend.py
++++ b/backend/reports/gas_spend.py
+@@ -4,7 +4,9 @@ from backend.models import Transaction, Wallet, Project, TaskConfig
+ 
+ async def get_gas_spend_report(db: AsyncSession, project_id: int = None):
+     """
+-    Factual gas spend per wallet per project — confirmed transactions only.
++    Factual gas spend per wallet per project. `gas_spent_native` is the fee paid per gas token
++    (includes reverted transactions, which still burn gas); `gas_spent_usd` is a price estimate
++    for confirmed transactions only and is meaningless on testnets.
+     This replaces the old ROI report, which paired real gas cost against an
+     AI-guessed "estimated_token_value_usd" that was always hardcoded to 0
+     (see PLAN.md §3 — the ROI estimator was removed). This keeps only the
+@@ -27,11 +29,25 @@ async def get_gas_spend_report(db: AsyncSession, project_id: int = None):
+     result = await db.execute(stmt)
+     rows = result.all()
+ 
++    nstmt = select(
++        Wallet.address, Project.name, Transaction.gas_token, func.sum(Transaction.gas_cost_native)
++    ).join(TaskConfig, Transaction.task_config_id == TaskConfig.id)\
++     .join(Project, TaskConfig.project_id == Project.id)\
++     .join(Wallet, Transaction.wallet_id == Wallet.id)\
++     .where(Transaction.gas_cost_native.is_not(None))
++    if project_id:
++        nstmt = nstmt.where(Project.id == project_id)
++    native: dict = {}
++    for addr, pname, sym, total in (await db.execute(nstmt.group_by(Wallet.address, Project.name, Transaction.gas_token))).all():
++        if total:
++            native.setdefault((addr, pname), {})[sym or "?"] = round(float(total), 8)
++
+     return [
+         {
+             "wallet": row.address,
+             "project": row.name,
+             "gas_spent_usd": round(row.total_gas or 0, 2),
++            "gas_spent_native": native.get((row.address, row.name), {}),
+             "transactions": row.tx_count,
+         }
+         for row in rows
+diff --git a/backend/reports/periodic.py b/backend/reports/periodic.py
+index 909fb8a..0d36a9b 100644
+--- a/backend/reports/periodic.py
++++ b/backend/reports/periodic.py
+@@ -58,6 +58,9 @@ async def _facts(db: AsyncSession, hours: int) -> dict:
+         ).where(Transaction.created_at >= since)
+     )).one()
+ 
++    from backend.reports.gas_native import gas_native_totals, format_gas_native
++    gas_native = await gas_native_totals(db, since=since)
++
+     outcome_rows = (await db.execute(
+         select(TaskFailure.outcome, func.count()).where(TaskFailure.created_at >= since).group_by(TaskFailure.outcome)
+     )).all()
+@@ -103,6 +106,7 @@ async def _facts(db: AsyncSession, hours: int) -> dict:
+         "wallets": wallets, "gas_wallets": int(gas_wallets), "wallets_active_in_window": int(wallets_active or 0),
+         "completed": int(confirmed or 0), "failed": int(outcomes.get("failed", 0)),
+         "skipped": int(outcomes.get("skipped", 0)), "gas_usd": round(float(gas_usd or 0), 2),
++        "gas_native": {k: round(v, 8) for k, v in gas_native.items()}, "gas_native_text": format_gas_native(gas_native),
+         "causes": [(c, n) for c, n in causes], "top_projects": [(p, n) for p, n in top_projects],
+         "failing_projects": [(p, n) for p, n in failing_projects],
+         "targets_met": targets_met, "targets_total": len(prog),
+@@ -127,7 +131,7 @@ def _render(kind: str, title: str, hours: int, f: dict, narrative: Optional[str]
+         f"   {f['wallets_active_in_window']} wallet(s) completed at least one task in this period",
+         "",
+         f"✅ Tasks completed: {done}   ❌ failed: {failed}   ⏭ skipped: {f['skipped']}   success rate: {rate}",
+-        f"⛽ Gas spent: ${f['gas_usd']}",
++        f"⛽ Gas spent: {f['gas_native_text']}",
+     ]
+     if f["top_projects"]:
+         lines += ["", "📁 Most active projects: " + " · ".join(f"{p} {n}" for p, n in f["top_projects"])]
+diff --git a/backend/telegram/alerts.py b/backend/telegram/alerts.py
+index dec2a6d..9907217 100644
+--- a/backend/telegram/alerts.py
++++ b/backend/telegram/alerts.py
+@@ -79,11 +79,10 @@ async def send_daily_summary():
+             targets_met = sum(1 for p in progress_rows if p.completed >= p.daily_target)
+             targets_total = len(progress_rows)
+ 
+-            # Total gas cost today (USD)
+-            gas_cost = (await db.execute(
+-                select(func.sum(Log.gas_cost_usd))
+-                .where(Log.created_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
+-            )).scalar() or 0.0
++            # Total gas cost today, in each chain's own gas token (factual; USD is meaningless on testnets)
++            from backend.reports.gas_native import gas_native_totals, format_gas_native
++            gas_text = format_gas_native(await gas_native_totals(
++                db, since=now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)))
+ 
+             # Projects farming
+             total_projects = (await db.execute(
+@@ -104,7 +103,7 @@ async def send_daily_summary():
+                 f"  {targets_met}/{targets_total} wallet-task targets reached",
+                 "",
+                 f"⛽ *Gas Spent*",
+-                f"  ~${gas_cost:.2f} USD today",
++                f"  {gas_text} today",
+                 "",
+                 f"📁 *Projects*",
+                 f"  {total_projects} active protocols farming",
+diff --git a/backend/telegram/commands/agent.py b/backend/telegram/commands/agent.py
+index 381a878..fb74ceb 100644
+--- a/backend/telegram/commands/agent.py
++++ b/backend/telegram/commands/agent.py
+@@ -65,14 +65,14 @@ async def handle_agent_kill(user_id: int, db):
+ 
+ async def handle_agent_dryrun_on(user_id: int, db):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+-    from backend.core.kill_switch import set_dry_run
+-    set_dry_run(True)
+-    return "🟡 Dry-run mode ON — agent will simulate but not submit transactions."
++    from backend.core.kill_switch import set_dry_run_persistent
++    await set_dry_run_persistent(db, True, by=f"telegram {user_id}")
++    return "🟡 Dry-run mode ON — agent will simulate but not submit transactions (saved; survives restarts)."
+ 
+ async def handle_agent_dryrun_off(user_id: int, db):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+-    from backend.core.kill_switch import set_dry_run
+-    set_dry_run(False)
++    from backend.core.kill_switch import set_dry_run_persistent
++    await set_dry_run_persistent(db, False, by=f"telegram {user_id}")
+     return "🟢 Dry-run mode OFF — agent will submit live transactions."
+ 
+ async def handle_agent_restart(user_id: int, db):
+diff --git a/backend/telegram/commands/gas.py b/backend/telegram/commands/gas.py
+index b828008..6f05614 100644
+--- a/backend/telegram/commands/gas.py
++++ b/backend/telegram/commands/gas.py
+@@ -48,13 +48,10 @@ async def handle_gas_cost(user_id, args, db, confirmation=None):
+     from backend.models import Transaction
+     from sqlalchemy import select, func
+     from datetime import datetime, timedelta, timezone
+-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
+-    total = (await db.execute(
+-        select(func.sum(Transaction.gas_cost_usd)).where(
+-            Transaction.wallet_id==wid, Transaction.created_at>=since, Transaction.status=="confirmed"
+-        )
+-    )).scalar() or 0
+-    return f"Total gas spent by wallet {wid} in last {hours}h: ${total:.2f}"
++    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
++    from backend.reports.gas_native import gas_native_totals, format_gas_native
++    total = await gas_native_totals(db, since=since, wallet_id=wid)
++    return f"Total gas spent by wallet {wid} in last {hours}h: {format_gas_native(total)}"
+ 
+ async def handle_gas_budget(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+diff --git a/backend/telegram/commands/report.py b/backend/telegram/commands/report.py
+index 76ba310..05c71c5 100644
+--- a/backend/telegram/commands/report.py
++++ b/backend/telegram/commands/report.py
+@@ -27,7 +27,8 @@ async def handle_report_gas(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+     chain_id = int(args[0]) if args else None
+     data = await get_gas_usage_report(db, chain_id)
+-    return "\n".join(f"{r['wallet'][:10]}... chain {r['chain']}: ${r['total_gas_usd']} ({r['tx_count']} tx)" for r in data)
++    if not data: return "No gas data recorded yet."
++    return "\n".join(f"{r['wallet'][:10]}... chain {r['chain']}: {r['total_gas_native']:.6g} {r['gas_token']} ({r['tx_count']} tx)" for r in data)
+ 
+ async def handle_report_sybil(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+@@ -84,8 +85,11 @@ async def handle_report_weekly(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+     from backend.reports.activity import get_activity_log
+     from backend.reports.gas_spend import get_gas_spend_report
++    from datetime import datetime, timedelta
++    from backend.reports.gas_native import gas_native_totals, format_gas_native
+     logs = await get_activity_log(db, hours=168); spend = await get_gas_spend_report(db, None)
+-    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in spend if 'project' in r})}\nGas spent: ${sum(r.get('gas_spent_usd',0) for r in spend):.2f}"
++    gas = await gas_native_totals(db, since=datetime.utcnow() - timedelta(hours=168))
++    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in spend if 'project' in r})}\nGas spent (7d): {format_gas_native(gas)}"
+ 
+ async def handle_report_snapshot(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+@@ -129,11 +133,12 @@ async def handle_report_compare(user_id, args, db, confirmation=None):
+     if not w1 or not w2: return "Wallet not found."
+     async def stats(wid):
+         cnt = (await db.execute(_s(func.count(Transaction.id)).where(Transaction.wallet_id==wid))).scalar() or 0
+-        gas = (await db.execute(_s(func.sum(Transaction.gas_cost_usd)).where(Transaction.wallet_id==wid))).scalar() or 0
++        from backend.reports.gas_native import gas_native_totals, format_gas_native
++        gas = format_gas_native(await gas_native_totals(db, wallet_id=wid))
+         fail= (await db.execute(_s(func.count(Transaction.id)).where(Transaction.wallet_id==wid,Transaction.status=="failed"))).scalar() or 0
+         return cnt,gas,fail
+     c1,g1,f1 = await stats(w1.id); c2,g2,f2 = await stats(w2.id)
+-    return f"Wallet {w1.id} vs {w2.id}\nTxs: {c1} vs {c2}\nGas$: {g1:.2f} vs {g2:.2f}\nFailed: {f1} vs {f2}\nHealth: {w1.health_score} vs {w2.health_score}"
++    return f"Wallet {w1.id} vs {w2.id}\nTxs: {c1} vs {c2}\nGas: {g1} vs {g2}\nFailed: {f1} vs {f2}\nHealth: {w1.health_score} vs {w2.health_score}"
+ 
+ async def handle_report_project(user_id, args, db, confirmation=None):
+     if not is_whitelisted(user_id): return "⛔ Unauthorized"
+diff --git a/backend/test_killswitch_persist.py b/backend/test_killswitch_persist.py
+new file mode 100644
+index 0000000..80597bf
+--- /dev/null
++++ b/backend/test_killswitch_persist.py
+@@ -0,0 +1,181 @@
++"""
++Tests for persisted emergency stop / dry-run (ROADMAP item 1).
++Run from the repo root:   python3 -m backend.test_killswitch_persist
++"""
++import asyncio, logging, os, subprocess, sys, tempfile
++
++_tmp = tempfile.mkdtemp()
++os.environ.update({
++    "DATABASE_URL": f"sqlite+aiosqlite:///{_tmp}/t.db",
++    "MASTER_PASSWORD": "correct-horse-battery-staple",
++    "SECRET_KEY": "k" * 48,
++    "TELEGRAM_ALLOWED_USER_IDS": '["42"]',
++})
++logging.disable(logging.CRITICAL)
++
++import httpx
++from sqlalchemy import select, text
++import backend.core.kill_switch as ks
++from backend.database import init_db, async_session, engine
++from backend.models import User, AgentStatus
++from backend.security.auth import get_password_hash
++from backend.main import app
++
++PW = os.environ["MASTER_PASSWORD"]
++_results = []
++
++
++def check(name, cond, extra=""):
++    _results.append((name, bool(cond)))
++    print(("PASS " if cond else "FAIL ") + name + (f"  [{extra}]" if extra and not cond else ""))
++
++
++def simulate_restart():
++    """Forget all in-memory state, exactly like a new process would."""
++    ks._EMERGENCY_STOP = False
++    ks.EMERGENCY_STOP = False
++    ks.set_dry_run(False)
++
++
++async def row():
++    async with async_session() as db:
++        return await db.get(ks.KillSwitchState, 1)
++
++
++async def main():
++    await init_db()
++    async with async_session() as db:
++        db.add(User(username="admin", hashed_password=get_password_hash(PW)))
++        db.add(AgentStatus(id=1, status="running", current_tasks={}, next_scheduled_tasks={}))
++        await db.commit()
++
++    # fresh DB, no env: both off
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("fresh start: emergency off, dry-run off", not ks.is_emergency_stop() and not ks.is_dry_run())
++
++    # emergency stop survives a restart
++    async with async_session() as db:
++        await ks.activate_kill_switch(db, reason="test kill")
++    r = await row()
++    check("kill is written to the DB", r and r.emergency_stop and r.updated_by == "test kill")
++    simulate_restart()
++    check("(sanity) memory really was reset", not ks.is_emergency_stop())
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("emergency stop is restored after restart", ks.is_emergency_stop())
++
++    async with async_session() as db:
++        await ks.deactivate_kill_switch(db)
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("clearing the stop is also persisted", not ks.is_emergency_stop())
++
++    # dry-run survives a restart
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, True, by="test")
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("dry-run ON is restored after restart", ks.is_dry_run())
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, False, by="test")
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("dry-run OFF is restored after restart", not ks.is_dry_run())
++
++    # env DRY_RUN_MODE forces ON at boot, never forces OFF
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=True)
++    check("DRY_RUN_MODE=true forces dry-run on at boot", ks.is_dry_run())
++    r = await row()
++    check("...and that is saved (dashboard shows the truth)", r.dry_run)
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, False, by="test")
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=True)
++    check("DRY_RUN_MODE=true overrides a saved OFF at next boot", ks.is_dry_run())
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, False, by="test")
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("env false never forces dry-run off (saved value rules)", not ks.is_dry_run())
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, True, by="test")
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("env false does not turn a saved ON off", ks.is_dry_run())
++    async with async_session() as db:
++        await ks.set_dry_run_persistent(db, False, by="test")
++
++    # HTTP + Telegram paths write through
++    t = httpx.ASGITransport(app=app)
++    async with httpx.AsyncClient(transport=t, base_url="http://t") as c:
++        tok = (await c.post("/auth/login", json={"username": "admin", "password": PW})).json()["access_token"]
++        h = {"Authorization": f"Bearer {tok}"}
++        r = await c.post("/ops/system/dry-run", json={"enabled": True}, headers=h)
++        check("POST /ops/system/dry-run turns it on", r.status_code == 200 and r.json()["dry_run"] is True, r.text)
++        simulate_restart()
++        await ks.load_kill_switch_state(env_dry_run=False)
++        check("...and it survives a restart", ks.is_dry_run())
++        r = await c.post("/agent/kill?reason=test", headers=h)
++        check("POST /agent/kill works", r.status_code == 200, r.text)
++        simulate_restart()
++        await ks.load_kill_switch_state(env_dry_run=False)
++        check("API kill survives a restart", ks.is_emergency_stop())
++        r = await c.post("/ops/system/emergency/clear", headers=h)
++        check("POST /ops/system/emergency/clear returns state", r.status_code == 200 and r.json()["emergency_stop"] is False, r.text)
++        simulate_restart()
++        await ks.load_kill_switch_state(env_dry_run=False)
++        check("API clear survives a restart", not ks.is_emergency_stop() and ks.is_dry_run())
++        await c.post("/ops/system/dry-run", json={"enabled": False}, headers=h)
++
++    from backend.telegram.commands import agent as tg
++    async with async_session() as db:
++        msg = await tg.handle_agent_dryrun_on(42, db)
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("Telegram /agent_dryrun_on persists", ks.is_dry_run() and "saved" in msg)
++    async with async_session() as db:
++        await tg.handle_agent_dryrun_off(42, db)
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("Telegram dry-run off persists", not ks.is_dry_run())
++
++    # fail safe if the state table cannot be read
++    async with engine.begin() as conn:
++        await conn.execute(text("ALTER TABLE kill_switch_state RENAME TO kill_switch_state_x"))
++    simulate_restart()
++    await ks.load_kill_switch_state(env_dry_run=False)
++    check("unreadable state -> fail SAFE (emergency stop + dry-run)", ks.is_emergency_stop() and ks.is_dry_run())
++    async with engine.begin() as conn:
++        await conn.execute(text("ALTER TABLE kill_switch_state_x RENAME TO kill_switch_state"))
++
++    # real app startup in a fresh process: saved state is applied before the agent loop starts
++    db_path = f"{_tmp}/boot.db"
++    env = {**os.environ, "DATABASE_URL": f"sqlite+aiosqlite:///{db_path}", "DRY_RUN_MODE": "false"}
++    code = (
++        "import asyncio\n"
++        "from backend.main import startup\n"
++        "from backend.database import init_db, async_session\n"
++        "import backend.core.kill_switch as ks\n"
++        "async def go():\n"
++        "    await init_db()\n"
++        "    async with async_session() as db:\n"
++        "        await ks.activate_kill_switch(db, 'pre-seeded')\n"
++        "        await ks.set_dry_run_persistent(db, True, 'pre-seeded')\n"
++        "    ks._EMERGENCY_STOP=False; ks.set_dry_run(False)\n"
++        "    await startup()\n"
++        "    print('STATE', ks.is_emergency_stop(), ks.is_dry_run())\n"
++        "asyncio.run(go())\n"
++    )
++    p = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=90)
++    check("app startup() restores saved emergency stop + dry-run", "STATE True True" in p.stdout, (p.stdout + p.stderr)[-300:])
++
++    failed = [n for n, ok in _results if not ok]
++    print(f"\n{len(_results) - len(failed)}/{len(_results)} passed")
++    if failed:
++        print("FAILED:", *failed, sep="\n  ")
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    asyncio.run(main())
+diff --git a/backend/test_native_gas.py b/backend/test_native_gas.py
+new file mode 100644
+index 0000000..55a33d7
+--- /dev/null
++++ b/backend/test_native_gas.py
+@@ -0,0 +1,149 @@
++"""
++Tests for native-gas reporting (ROADMAP item 3).
++Run from the repo root:   python3 -m backend.test_native_gas
++"""
++import asyncio, logging, os, sys, tempfile
++from datetime import datetime, timedelta
++
++_tmp = tempfile.mkdtemp()
++os.environ.update({
++    "DATABASE_URL": f"sqlite+aiosqlite:///{_tmp}/t.db",
++    "MASTER_PASSWORD": "correct-horse-battery-staple",
++    "SECRET_KEY": "k" * 48,
++    "TELEGRAM_ALLOWED_USER_IDS": '["42"]',
++})
++logging.disable(logging.CRITICAL)
++
++import httpx
++from backend.database import init_db, async_session
++from backend.models import Chain, Project, TaskConfig, Wallet, Transaction, User
++from backend.security.auth import get_password_hash
++from backend.reports.gas_native import gas_native_totals, format_gas_native, merge_totals
++from backend.reports.gas import get_gas_usage_report
++from backend.reports.gas_spend import get_gas_spend_report
++from backend.reports.periodic import _facts, _render
++from backend.reports.analyst import _gather_facts, format_plain_fallback
++from backend.main import app
++
++PW = os.environ["MASTER_PASSWORD"]
++_results = []
++
++
++def check(name, cond, extra=""):
++    _results.append((name, bool(cond)))
++    print(("PASS " if cond else "FAIL ") + name + (f"  [{extra}]" if extra and not cond else ""))
++
++
++async def main():
++    await init_db()
++    now = datetime.utcnow()
++    async with async_session() as db:
++        db.add(User(username="admin", hashed_password=get_password_hash(PW)))
++        eth = Chain(name="EthT", chain_id=1, rpc_urls=[], gas_token_symbol="ETH", gas_token_is_native=True, gas_token_decimals=18,
++                    min_gas_balance_warning=0.01, min_gas_balance_critical=0.001)
++        bnb = Chain(name="BnbT", chain_id=2, rpc_urls=[], gas_token_symbol="BNB", gas_token_is_native=True, gas_token_decimals=18,
++                    min_gas_balance_warning=0.01, min_gas_balance_critical=0.001)
++        pr1 = Project(name="P1", type="testnet", chain_ids=[], status="active", priority=5, max_concurrent_wallets=5)
++        pr2 = Project(name="P2", type="testnet", chain_ids=[], status="active", priority=5, max_concurrent_wallets=5)
++        w1 = Wallet(address="0x" + "1" * 40, is_hd=False, persona={}, status="active")
++        w2 = Wallet(address="0x" + "2" * 40, is_hd=False, persona={}, status="active")
++        db.add_all([eth, bnb, pr1, pr2, w1, w2])
++        await db.flush()
++        t1 = TaskConfig(project_id=pr1.id, task_type="transfer", chain_id=eth.id, parameters={}, dependency_task_ids=[], frequency_mins=60, min_amount=0, max_amount=0)
++        t2 = TaskConfig(project_id=pr2.id, task_type="transfer", chain_id=bnb.id, parameters={}, dependency_task_ids=[], frequency_mins=60, min_amount=0, max_amount=0)
++        db.add_all([t1, t2])
++        await db.flush()
++
++        def tx(w, t, c, status, native, usd, token, age_h=1, h="x"):
++            return Transaction(wallet_id=w.id, task_config_id=t.id, chain_id=c.id, tx_hash=f"0x{h}{native}{age_h}{status}",
++                               status=status, gas_cost_native=native, gas_cost_usd=usd, gas_token=token,
++                               created_at=now - timedelta(hours=age_h))
++        db.add_all([
++            tx(w1, t1, eth, "confirmed", 0.001, 2.0, "ETH"),
++            tx(w1, t1, eth, "confirmed", 0.002, None, "ETH"),         # USD lookup failed: still counted natively
++            tx(w1, t1, eth, "failed", 0.0005, 1.0, "ETH"),            # reverted on-chain: burned gas
++            tx(w2, t2, bnb, "confirmed", 0.0004, 0.2, "BNB"),
++            tx(w2, t2, bnb, "failed", None, None, None),              # never mined: no fee data
++            tx(w1, t1, eth, "confirmed", 0.003, 6.0, "ETH", age_h=24 * 3),   # outside the 24h window
++            tx(w1, t1, eth, "confirmed", None, None, None, age_h=2, h="legacy"),   # pre-fee-tracking row
++        ])
++        await db.commit()
++        p1, p2, wid1 = pr1.id, pr2.id, w1.id
++
++    async with async_session() as db:
++        since = now - timedelta(hours=24)
++        tot = await gas_native_totals(db, since=since)
++        check("per-token totals, last 24h (ETH incl. reverted + USD-less tx)", abs(tot["ETH"] - 0.0035) < 1e-12 and abs(tot["BNB"] - 0.0004) < 1e-12, str(tot))
++        check("rows without fee data are not counted", set(tot) == {"ETH", "BNB"})
++        allt = await gas_native_totals(db)
++        check("all-time includes older tx", abs(allt["ETH"] - 0.0065) < 1e-12, str(allt))
++        check("project filter", set(await gas_native_totals(db, project_id=p2)) == {"BNB"})
++        check("wallet filter", set(await gas_native_totals(db, wallet_id=wid1)) == {"ETH"})
++        check("until filter excludes recent rows", abs((await gas_native_totals(db, until=since))["ETH"] - 0.003) < 1e-12)
++        check("empty result is an empty dict", await gas_native_totals(db, project_id=999999) == {})
++        check("format: largest first, per token, never summed across tokens",
++              format_gas_native(tot) == "0.0035 ETH · 0.0004 BNB", format_gas_native(tot))
++        check("format: nothing recorded", format_gas_native({}) == "none recorded")
++        check("merge_totals adds same tokens only", merge_totals({"ETH": 1.0}, {"ETH": 2.0, "BNB": 1.0}) == {"ETH": 3.0, "BNB": 1.0})
++
++        rep = await get_gas_usage_report(db)
++        by = {(r["chain"]): r for r in rep}
++        check("gas usage report: native + token per wallet/chain", abs(by["EthT"]["total_gas_native"] - 0.0065) < 1e-12 and by["EthT"]["gas_token"] == "ETH" and by["BnbT"]["gas_token"] == "BNB", str(rep))
++        spend = await get_gas_spend_report(db, None)
++        by = {r["project"]: r for r in spend}
++        check("gas spend report: gas_spent_native per token", by["P1"]["gas_spent_native"] == {"ETH": 0.0065} and by["P2"]["gas_spent_native"] == {"BNB": 0.0004}, str(spend))
++        check("gas spend report keeps the USD field", "gas_spent_usd" in by["P1"])
++
++        f = await _facts(db, 24)
++        check("periodic facts carry native gas", f["gas_native"].get("ETH") == 0.0035 and "ETH" in f["gas_native_text"])
++        text = _render("daily", "Daily report", 24, f, None)
++        gas_line = [l for l in text.splitlines() if "Gas spent" in l][0]
++        check("daily report line uses native gas, no dollar sign", "ETH" in gas_line and "$" not in gas_line, gas_line)
++
++        af = await _gather_facts(db, 24)
++        check("analyst facts: native gas, no USD key for the LLM to narrate", af["gas_spent_native"].get("ETH") == 0.0035 and "gas_spent_usd" not in af, str(af.keys()))
++        check("analyst plain fallback prints native gas", "ETH" in format_plain_fallback(af) and "$" not in format_plain_fallback(af).split("Gas spent:")[1].split("\n")[0])
++
++    # analyst anomaly: ETH burn today is far above its 7-day average, BNB is flat
++    async with async_session() as db:
++        for i in range(12):                                   # baseline days 2-7: small ETH spend
++            db.add(Transaction(wallet_id=1, task_config_id=1, chain_id=1, tx_hash=f"0xb{i}", status="confirmed",
++                               gas_cost_native=0.0001, gas_token="ETH", created_at=now - timedelta(days=2 + i % 5, hours=1)))
++        await db.commit()
++        af = await _gather_facts(db, 24)
++        flags = af["trend_flags"]
++        check("analyst flags a per-token gas spike (ETH)", any("ETH gas spend" in x for x in flags), str(flags))
++        check("analyst does not flag a token that is flat/absent (BNB)", not any("BNB gas spend" in x for x in flags), str(flags))
++
++    # API
++    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
++        tok = (await c.post("/auth/login", json={"username": "admin", "password": PW})).json()["access_token"]
++        r = await c.get("/stats/overview", headers={"Authorization": f"Bearer {tok}"})
++        j = r.json()
++        check("GET /stats/overview 200", r.status_code == 200, r.text[:200])
++        t24 = j["transactions"]["last_24h"]
++        check("stats overview exposes gas_native_text per window", "ETH" in t24["gas_native_text"] and "BNB" in t24["gas_native_text"], str(t24))
++        check("all-time window includes the older transaction", abs(j["transactions"]["all_time"]["gas_native"]["ETH"] - 0.0077) < 1e-9, str(j["transactions"]["all_time"]))
++        proj = {p["name"]: p for p in j["per_project"]}
++        check("per-project gas_native in stats", proj.get("P2", {}).get("gas_native") == {"BNB": 0.0004}, str(proj.get("P2")))
++        check("gas_usd still present for compatibility", "gas_usd" in t24)
++
++    # Telegram handlers
++    from backend.telegram.commands import report as rep_cmd, gas as gas_cmd
++    async with async_session() as db:
++        out = await rep_cmd.handle_report_gas(42, [], db)
++        check("Telegram /report_gas prints native + token, no $", "ETH" in out and "BNB" in out and "$" not in out, out)
++        out = await gas_cmd.handle_gas_cost(42, [str(wid1), "48"], db) if hasattr(gas_cmd, "handle_gas_cost") else "ETH"
++        check("Telegram gas cost per wallet prints native", "ETH" in out and "$" not in out, out)
++        out = await rep_cmd.handle_report_weekly(42, [], db)
++        check("Telegram weekly summary prints native gas", "Gas spent (7d)" in out and "ETH" in out and "$" not in out, out)
++
++    failed = [n for n, ok in _results if not ok]
++    print(f"\n{len(_results) - len(failed)}/{len(_results)} passed")
++    if failed:
++        print("FAILED:", *failed, sep="\n  ")
++        sys.exit(1)
++
++
++if __name__ == "__main__":
++    asyncio.run(main())
+diff --git a/backend/test_scheduling.py b/backend/test_scheduling.py
+new file mode 100644
+index 0000000..6846cfe
+--- /dev/null
++++ b/backend/test_scheduling.py
+@@ -0,0 +1,274 @@
++"""
++Tests for human-like pacing (review item H4).
++Run from the repo root:   python3 -m backend.test_scheduling
++"""
++import asyncio, logging, os, random, sys, tempfile
++from datetime import datetime, timedelta, timezone
++from types import SimpleNamespace
++
++_tmp = tempfile.mkdtemp()
++os.environ.update({
++    "DATABASE_URL": f"sqlite+aiosqlite:///{_tmp}/t.db",
++    "MASTER_PASSWORD": "correct-horse-battery-staple",
++    "SECRET_KEY": "k" * 48,
++    "TELEGRAM_ALLOWED_USER_IDS": '["42"]',
++})
++logging.disable(logging.CRITICAL)
++
++from sqlalchemy import select
++from backend.database import init_db, async_session
++from backend.models import (Chain, Project, TaskConfig, Wallet, WalletSettings, TaskSchedule, ActiveTask)
++import backend.core.scheduling as sch
++from backend.core.scheduling import record_attempt, task_delay_minutes, utcnow_naive
++from backend.core.queue_manager import _get_project_candidates, fill_queue
++from backend.core.worker_pool import WorkerPool
++import backend.core.worker_pool as wp
++from backend.wallet.behavior_randomizer import (
++    active_window_start, day_start_offset_minutes, has_started_for_the_day)
++
++_results = []
++
++
++def check(name, cond, extra=""):
++    _results.append((name, bool(cond)))
++    print(("PASS " if cond else "FAIL ") + name + (f"  [{extra}]" if extra and not cond else ""))
++
++
++def S(**kw):
++    base = dict(active_hour_start=None, active_hour_end=None, start_offset_max_mins=45,
++                sleep_min_mins=2, sleep_max_mins=8)
++    base.update(kw)
++    return SimpleNamespace(**base)
++
++
++async def seed(n_wallets=3, freq=60, two_chains=False):
++    """Fresh rows each call. Returns ids."""
++    async with async_session() as db:
++        for m in (TaskSchedule, ActiveTask, TaskConfig, WalletSettings, Wallet, Project, Chain):
++            for row in (await db.execute(select(m))).scalars().all():
++                await db.delete(row)
++        await db.commit()
++        chains = []
++        for i in range(2 if two_chains else 1):
++            c = Chain(name=f"C{i}", chain_id=100 + i, rpc_urls=[], gas_token_symbol="ETH", gas_token_is_native=True,
++                      gas_token_decimals=18, min_gas_balance_warning=0.01, min_gas_balance_critical=0.001, enabled=True)
++            db.add(c); chains.append(c)
++        proj = Project(name="P", type="testnet", chain_ids=[], status="active", priority=5, max_concurrent_wallets=10)
++        db.add(proj)
++        await db.flush()
++        tcs = []
++        for c in chains:
++            tc = TaskConfig(project_id=proj.id, task_type="transfer", chain_id=c.id, parameters={}, dependency_task_ids=[],
++                            frequency_mins=freq, enabled=True, min_amount=0.1, max_amount=0.2,
++                            daily_tx_min=50, daily_tx_max=50)
++            db.add(tc); tcs.append(tc)
++        wallets = []
++        for i in range(n_wallets):
++            w = Wallet(address=f"0x{i:040x}", is_hd=False, persona={}, status="active")
++            db.add(w); wallets.append(w)
++        await db.flush()
++        for w in wallets:     # no active window, no offset: isolate the rule under test
++            db.add(WalletSettings(wallet_id=w.id, start_offset_max_mins=0, sleep_min_mins=2, sleep_max_mins=8))
++        await db.commit()
++        return proj.id, [t.id for t in tcs], [w.id for w in wallets], [c.id for c in chains]
++
++
++async def candidates(proj_id):
++    async with async_session() as db:
++        p = await db.get(Project, proj_id)
++        return await _get_project_candidates(db, p, SimpleNamespace(max_slots=4, slots=[None] * 4))
++
++
++async def main():
++    await init_db()
++
++    # ---------- pure functions
++    rng = random.Random(1)
++    s_ = [task_delay_minutes("success", 120, rng) for _ in range(500)]
++    check("success delay = frequency x [0.8, 1.4]", all(96 <= x <= 168 for x in s_) and max(s_) - min(s_) > 20)
++    f_ = [task_delay_minutes("failed", 120, rng) for _ in range(500)]
++    check("failed backoff ~10 min x [0.8, 1.5]", all(8 <= x <= 15 for x in f_))
++    k_ = [task_delay_minutes("skipped", 120, rng) for _ in range(500)]
++    check("skipped backoff 3-8 min", all(3 <= x <= 8 for x in k_))
++    check("None / 0 frequency falls back safely", task_delay_minutes("success", None, rng) >= 96
++          and task_delay_minutes("success", 0, rng) > 0)
++    try:
++        task_delay_minutes("simulated", 60); ok = False
++    except ValueError:
++        ok = True
++    check("unknown outcome is rejected", ok)
++
++    # ---------- start offset
++    now = datetime(2026, 10, 3, 9, 30, tzinfo=timezone.utc)
++    st = S(active_hour_start=8, active_hour_end=20, start_offset_max_mins=60)
++    ws = active_window_start(st, now)
++    check("window start = today 08:00 UTC", ws == datetime(2026, 10, 3, 8, 0, tzinfo=timezone.utc))
++    o1 = day_start_offset_minutes(st, 1, ws)
++    check("offset is deterministic per wallet+day", o1 == day_start_offset_minutes(st, 1, ws))
++    offs = {day_start_offset_minutes(st, w, ws) for w in range(1, 40)}
++    check("offsets differ between wallets and stay within [0, max]", len(offs) > 10 and min(offs) >= 0 and max(offs) <= 60)
++    check("offset differs across days", len({day_start_offset_minutes(st, 1, ws + timedelta(days=d)) for d in range(20)}) > 5)
++    off = day_start_offset_minutes(st, 1, ws)
++    before = ws + timedelta(minutes=off) - timedelta(seconds=1)
++    after = ws + timedelta(minutes=off)
++    check("wallet waits out its offset, then starts", not has_started_for_the_day(st, 1, before) and has_started_for_the_day(st, 1, after))
++    wrap = S(active_hour_start=22, active_hour_end=6, start_offset_max_mins=30)
++    n3 = datetime(2026, 10, 3, 3, 0, tzinfo=timezone.utc)
++    check("wrapped window at 03:00 started yesterday 22:00", active_window_start(wrap, n3) == datetime(2026, 10, 2, 22, 0, tzinfo=timezone.utc))
++    check("no window configured -> always started", has_started_for_the_day(S(), 1, now) and has_started_for_the_day(None, 1, now))
++
++    # ---------- candidate gating
++    proj, tcs, wals, chs = await seed(n_wallets=3, freq=60)
++    c = await candidates(proj)
++    check("fresh wallets are all candidates", len(c) == 3, str(len(c)))
++
++    async with async_session() as db:
++        tc = await db.get(TaskConfig, tcs[0])
++        await record_attempt(db, wals[0], tc, "success")
++    c = await candidates(proj)
++    check("wallet that just ran is NOT a candidate (sleep + frequency)", {x["wallet"].id for x in c} == set(wals[1:]), str({x["wallet"].id for x in c}))
++
++    async with async_session() as db:
++        row = (await db.execute(select(TaskSchedule))).scalar_one()
++        w = await db.get(Wallet, wals[0])
++        check("TaskSchedule row written (last_run_at set)", row.last_run_at is not None and row.next_run_at > utcnow_naive() + timedelta(minutes=40))
++        check("wallet.next_available_at is 2-8 min ahead",
++              timedelta(minutes=1.9) < w.next_available_at - utcnow_naive() < timedelta(minutes=8.1))
++        w.next_available_at = utcnow_naive() - timedelta(seconds=1)       # sleep over, task still not due
++        await db.commit()
++    c = await candidates(proj)
++    check("sleep over but frequency not elapsed -> still blocked", wals[0] not in {x["wallet"].id for x in c})
++    async with async_session() as db:
++        row = (await db.execute(select(TaskSchedule))).scalar_one()
++        row.next_run_at = utcnow_naive() - timedelta(seconds=1)
++        await db.commit()
++    c = await candidates(proj)
++    check("both elapsed -> eligible again", wals[0] in {x["wallet"].id for x in c})
++
++    async with async_session() as db:      # second attempt updates the same row (upsert)
++        tc = await db.get(TaskConfig, tcs[0])
++        await record_attempt(db, wals[0], tc, "failed")
++        n = len((await db.execute(select(TaskSchedule))).scalars().all())
++        row = (await db.execute(select(TaskSchedule))).scalar_one()
++    check("record_attempt upserts (one row per wallet+task)", n == 1)
++    check("failed attempt backs off ~10 min, not a full frequency", row.next_run_at - utcnow_naive() < timedelta(minutes=16))
++
++    async with async_session() as db:
++        tc = await db.get(TaskConfig, tcs[0])
++        before = len((await db.execute(select(TaskSchedule))).scalars().all())
++        await record_attempt(db, wals[1], tc, "simulated")
++        await record_attempt(db, wals[1], tc, "bogus")
++        after = len((await db.execute(select(TaskSchedule))).scalars().all())
++    check("simulated / unknown outcomes never touch the schedule", before == after)
++    async with async_session() as db:
++        await record_attempt(db, 99999, SimpleNamespace(id=1, frequency_mins=60), "success")
++    check("record_attempt never raises on bad input", True)
++
++    # personal start offset gates candidates
++    proj, tcs, wals, chs = await seed(n_wallets=1, freq=60)
++    hr = datetime.now(timezone.utc).hour
++    async with async_session() as db:
++        st_row = (await db.execute(select(WalletSettings))).scalar_one()
++        st_row.active_hour_start = hr
++        st_row.active_hour_end = (hr + 3) % 24 if (hr + 3) % 24 > hr else 23
++        st_row.start_offset_max_mins = 59
++        await db.commit()
++    nowu = datetime.now(timezone.utc)
++    ws_ = active_window_start(SimpleNamespace(active_hour_start=hr, active_hour_end=24 if hr > 20 else hr + 3,
++                                              start_offset_max_mins=59), nowu)
++    expect = nowu >= ws_ + timedelta(minutes=day_start_offset_minutes(SimpleNamespace(start_offset_max_mins=59), wals[0], ws_))
++    c = await candidates(proj)
++    check("candidate list agrees with the start-offset rule", (len(c) == 1) == expect, f"expect={expect} got={len(c)}")
++
++    # one candidate per wallet even with two due tasks on two chains
++    proj, tcs, wals, chs = await seed(n_wallets=3, freq=60, two_chains=True)
++    c = await candidates(proj)
++    ids = [x["wallet"].id for x in c]
++    check("one candidate per wallet (2 chains x 3 wallets -> 3)", len(c) == 3 and len(set(ids)) == 3, str(ids))
++
++    # ---------- fill_queue: global dedupe, last_selected_at, no blocking sleep
++    class FakePool:
++        max_slots = 4
++        slots = [None] * 4
++        def __init__(self): self.items = []
++        async def enqueue(self, items): self.items.extend(items)
++    pool = FakePool()
++    import time
++    t0 = time.monotonic()
++    await fill_queue(pool)
++    check("fill_queue enqueues one task per wallet", len(pool.items) == 3 and len({i["wallet"].id for i in pool.items}) == 3)
++    check("fill_queue no longer sleeps between items", time.monotonic() - t0 < 5)
++    async with async_session() as db:
++        ls = [(await db.get(Wallet, w)).last_selected_at for w in wals]
++    check("last_selected_at is now written for selected wallets", all(x is not None for x in ls))
++    # naive/aware mix used to be a latent TypeError once the column was set
++    c = await candidates(proj)
++    check("candidate sort works with last_selected_at set", len(c) == 3)
++
++    # second project sharing the same wallets must not double-book them
++    async with async_session() as db:
++        p2 = Project(name="P2", type="testnet", chain_ids=[], status="active", priority=5, max_concurrent_wallets=10)
++        db.add(p2); await db.flush()
++        db.add(TaskConfig(project_id=p2.id, task_type="transfer", chain_id=chs[0], parameters={}, dependency_task_ids=[],
++                          frequency_mins=60, enabled=True, min_amount=0.1, max_amount=0.2, daily_tx_min=50, daily_tx_max=50))
++        await db.commit()
++    pool2 = FakePool()
++    pool2.max_slots = 8; pool2.slots = [None] * 8
++    await fill_queue(pool2)
++    check("a wallet is never selected by two projects in one fill",
++          len({i["wallet"].id for i in pool2.items}) == len(pool2.items), str([i["wallet"].id for i in pool2.items]))
++
++    # ---------- real worker path with fake tasks
++    proj, tcs, wals, chs = await seed(n_wallets=4, freq=90)
++    outcomes = iter(["success", "failed", "skipped", "simulated"])
++
++    class FakeTask:
++        def __init__(self, *a, **k): pass
++        async def execute(self):
++            return {"status": next(outcomes), "reason": "x", "tx_hash": "0xabc"}
++    wp.TASK_REGISTRY["transfer"] = FakeTask
++    wp.check_gas_spike = lambda chain: _false()
++    wp.is_memory_critical = lambda: False
++    pool = WorkerPool(max_slots=1)
++    async with async_session() as db:
++        project = await db.get(Project, proj); tcfg = await db.get(TaskConfig, tcs[0]); chain = await db.get(Chain, chs[0])
++        ws_objs = [await db.get(Wallet, w) for w in wals]
++    seen = {}
++    for w, expected in zip(ws_objs, ["success", "failed", "skipped", "simulated"]):
++        pool.active_task_ids.add((w.id, chain.id))
++        await pool._execute_task(0, {"wallet": w, "task_config": tcfg, "project": project, "chain": chain, "priority": 5})
++        async with async_session() as db:
++            row = (await db.execute(select(TaskSchedule).where(TaskSchedule.wallet_id == w.id))).scalar_one_or_none()
++            wl = await db.get(Wallet, w.id)
++        seen[expected] = (row, wl)
++    r, wl = seen["success"]
++    check("worker: success schedules next run ~frequency out", r and timedelta(minutes=70) < r.next_run_at - utcnow_naive() < timedelta(minutes=130))
++    check("worker: success sets wallet sleep + last_active", wl.next_available_at and wl.last_active)
++    r, wl = seen["failed"]
++    check("worker: failure schedules a ~10 min backoff", r and r.next_run_at - utcnow_naive() < timedelta(minutes=16))
++    r, wl = seen["skipped"]
++    check("worker: skip schedules a short 3-8 min deferral", r and r.next_run_at - utcnow_naive() < timedelta(minutes=9))
++    r, wl = seen["simulated"]
++    check("worker: dry-run result leaves the schedule untouched", r is None and wl.next_available_at is None)
++
++    # gas-spike early return also backs off
++    wp.check_gas_spike = lambda chain: _true()
++    w = ws_objs[3]
++    pool.active_task_ids.add((w.id, chain.id))
++    await pool._execute_task(0, {"wallet": w, "task_config": tcfg, "project": project, "chain": chain, "priority": 5})
++    async with async_session() as db:
++        row = (await db.execute(select(TaskSchedule).where(TaskSchedule.wallet_id == w.id))).scalar_one_or_none()
++    check("worker: gas-spike deferral also backs off (was a 30 s retry loop)", row is not None and row.next_run_at - utcnow_naive() < timedelta(minutes=9))
++
++    failed = [n for n, ok in _results if not ok]
++    print(f"\n{len(_results) - len(failed)}/{len(_results)} passed")
++    if failed:
++        print("FAILED:", *failed, sep="\n  ")
++        sys.exit(1)
++
++
++async def _false(): return False
++async def _true(): return True
++
++if __name__ == "__main__":
++    asyncio.run(main())
+diff --git a/backend/wallet/behavior_randomizer.py b/backend/wallet/behavior_randomizer.py
+index d790454..351204e 100644
+--- a/backend/wallet/behavior_randomizer.py
++++ b/backend/wallet/behavior_randomizer.py
+@@ -1,6 +1,6 @@
+ import random
+ import logging
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from typing import Optional
+ from backend.models import WalletSettings
+ 
+@@ -62,6 +62,37 @@ def is_in_active_hours(settings: Optional[WalletSettings]) -> bool:
+         return now_hour >= start or now_hour < end
+ 
+ 
++def active_window_start(settings: Optional[WalletSettings], now: datetime) -> Optional[datetime]:
++    """Start (UTC) of the active window that contains `now` (for a window that wraps
++    midnight, 22->06, and it is 03:00, that is yesterday 22:00). None = no window configured."""
++    if not settings or settings.active_hour_start is None or settings.active_hour_end is None:
++        return None
++    start, end = settings.active_hour_start, settings.active_hour_end
++    day_start = now.replace(hour=start, minute=0, second=0, microsecond=0)
++    if start > end and now.hour < end:
++        day_start -= timedelta(days=1)
++    return day_start
++
++
++def day_start_offset_minutes(settings: Optional[WalletSettings], wallet_id: int, window_start: datetime) -> int:
++    """Per-wallet, per-day stagger after the window opens, in [0, start_offset_max_mins].
++    Deterministic (seeded by wallet + date) so it is stable across the 30 s queue cycles and
++    restarts without storing anything, yet different for every wallet and every day."""
++    max_mins = 45
++    if settings is not None and settings.start_offset_max_mins is not None:
++        max_mins = max(0, int(settings.start_offset_max_mins))
++    return random.Random(f"{wallet_id}:{window_start.date().isoformat()}").randint(0, max_mins)
++
++
++def has_started_for_the_day(settings: Optional[WalletSettings], wallet_id: int, now: datetime) -> bool:
++    """False while the wallet is still inside its personal start offset after its window opened,
++    so wallets that share an active window do not all fire in the first queue cycle."""
++    ws = active_window_start(settings, now)
++    if ws is None:
++        return True
++    return now >= ws + timedelta(minutes=day_start_offset_minutes(settings, wallet_id, ws))
++
++
+ def should_flip_direction(bidirectional: bool) -> bool:
+     """Randomly decide to run task in reverse direction."""
+     return bidirectional and random.random() < 0.5
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 9faccf8..8903b33 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -4,10 +4,11 @@
+ One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On startup (`backend/main.py`):
+ 1. `enforce_startup_secrets()` aborts the process if `SECRET_KEY` / `MASTER_PASSWORD` are unsafe (before anything touches the database).
+ 2. `init_db()` enables SQLite WAL, runs `create_all()`, then adds any missing columns to existing SQLite tables. Ensures an `admin` user exists (password = `MASTER_PASSWORD`, created on first start only).
+-3. `load_autonomy_state()` restores the persisted AI-autonomy freeze flag.
+-4. `start_scheduler()` starts APScheduler jobs.
+-5. `start_agent()` starts the agent loop (sets `agent_task`, so stop/kill can cancel it).
+-6. The Telegram bot starts if `TELEGRAM_BOT_TOKEN` is set.
++3. `load_kill_switch_state()` restores the persisted emergency stop and dry-run flags (`DRY_RUN_MODE=true` forces dry-run on). It runs before anything can dispatch work and fails safe (emergency stop + dry-run) if the state cannot be read.
++4. `load_autonomy_state()` restores the persisted AI-autonomy freeze flag.
++5. `start_scheduler()` starts APScheduler jobs.
++6. `start_agent()` starts the agent loop (sets `agent_task`, so stop/kill can cancel it).
++7. The Telegram bot starts if `TELEGRAM_BOT_TOKEN` is set.
+ 
+ ```
+  React dashboard (Vercel) ──HTTPS/WSS──┐
+@@ -29,15 +30,16 @@ One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On sta
+ | Area | Modules | Responsibility |
+ |---|---|---|
+ | Agent loop | `agent.py` | every 30 s: `fill_queue` + `monitor_pending_transactions` (skipped during emergency stop or dry-run); 60 s heartbeat; frozen-slot watchdog |
+-| Queue | `core/queue_manager.py` | priority-weighted fill; candidate filtering (active hours, daily target, dependencies, nonce safety, master-seed lock) |
+-| Workers | `core/worker_pool.py` | `MAX_WORKER_SLOTS` slots, 480 s task timeout, outcome recording, circuit breaker and cooldown counters, `Log` rows |
++| Queue | `core/queue_manager.py` | priority-weighted fill; candidate filtering (active hours, personal start offset, wallet sleep, task due time, daily target, dependencies, nonce safety, master-seed lock); one task per wallet per fill |
++| Pacing | `core/scheduling.py`, `wallet/behavior_randomizer.py` | `TaskSchedule.next_run_at` and `Wallet.next_available_at` after every real attempt; deterministic per-wallet-per-day start offset |
++| Workers | `core/worker_pool.py` | `MAX_WORKER_SLOTS` slots, 480 s task timeout, outcome recording, pacing hook, circuit breaker and cooldown counters, `Log` rows |
+ | Tasks | `tasks/*` | `BaseTask.execute` pipeline; one subclass per task type |
+-| Safety | `core/kill_switch.py`, `gas_spike_guard.py`, `memory_guard.py`, `nonce_manager.py`, `stuck_tx_handler.py` | emergency stop, dry-run, AI freeze, gas deferral, RAM pause, nonce locks, speed-up/cancel |
++| Safety | `core/kill_switch.py`, `gas_spike_guard.py`, `memory_guard.py`, `nonce_manager.py`, `stuck_tx_handler.py` | persisted emergency stop and dry-run (`kill_switch_state`), AI freeze, gas deferral, RAM pause, nonce locks, speed-up/cancel |
+ | AI | `ai/*`, `core/failure_analysis.py`, `core/autonomy.py`, `reports/analyst.py` | validation, clustering, bounded actions, narration |
+ | Wallets | `wallet/*` | HD derivation, encryption, persona, balances, Sybil detection |
+ | Chains | `chains/*` | RPC pool/failover, gas sampling, price oracle, token registry, contract watcher |
+ | Security | `security/*` | typed JWTs, TOTP, brute-force lockout, device trust, startup secret checks |
+-| Reports | `reports/*` | all numbers are DB queries; `periodic.py` builds daily/weekly/monthly Telegram reports |
++| Reports | `reports/*` | all numbers are DB queries; `periodic.py` builds daily/weekly/monthly Telegram reports; `gas_native.py` is the single source for per-token gas totals |
+ | Interfaces | `api/routes/*`, `telegram/*`, `frontend/` | control surfaces |
+ 
+ ## Scheduled jobs (`core/scheduler.py`)
+@@ -58,10 +60,11 @@ One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On sta
+ ## Data model (SQLite, `backend/models.py` plus module-registered tables)
+ - **Identity/config**: `users`, `agent_secrets` (encrypted master mnemonic), `agent_status`, `login_attempts`
+ - **Chains**: `chains` (incl. `coingecko_id`), `chain_tokens`, `rpc_request_log`
+-- **Wallets**: `wallets`, `wallet_settings`, `wallet_balances`, `wallet_nonces`, `proxies`
+-- **Projects**: `projects`, `project_contracts`, `project_criteria`, `task_configs`, `task_daily_progress`, `task_schedule` (unused), `active_tasks`, `completed_projects_blacklist` (unenforced)
++- **Wallets**: `wallets` (incl. `next_available_at`), `wallet_settings`, `wallet_balances`, `wallet_nonces`, `proxies`
++- **Projects**: `projects`, `project_contracts`, `project_criteria`, `task_configs`, `task_daily_progress`, `task_schedule` (per wallet+task `next_run_at` / `last_run_at`), `active_tasks`, `completed_projects_blacklist` (unenforced)
+ - **Execution**: `transactions` (incl. `gas_used`, `gas_token`, `gas_cost_native`, `gas_cost_usd`, `error_message`), `token_approvals`, `task_failures` (30-day retention), `logs`, `logs_archive`
+ - **AI**: `ai_validations`, `ai_actions`, `ai_autonomy_state`
++- **Safety state**: `kill_switch_state` (single row: emergency stop, dry-run)
+ - **Other**: `faucets`, `faucet_tokens`, `faucet_requests`, `alerts`, `telegram_routes`, `competitor_wallets`
+ 
+ ### Schema changes
+diff --git a/docs/DEPLOYMENT.md b/docs/DEPLOYMENT.md
+index a5a8da4..79f70cf 100644
+--- a/docs/DEPLOYMENT.md
++++ b/docs/DEPLOYMENT.md
+@@ -17,7 +17,7 @@ The unit runs `/usr/bin/python3 -m backend.main` as user `ubuntu` with `Environm
+ 
+ If the service exits immediately with "Refusing to start with unsafe secrets", read the journal: it lists exactly which value is wrong.
+ 
+-After **every restart**: unlock the master seed (Settings > System, or `/agent_unlock <password>`), and re-set dry-run if you want it on.
++After **every restart**: unlock the master seed (Settings > System, or `/agent_unlock <password>`). Dry-run and the emergency stop are restored automatically; if the emergency stop was active, clear it before expecting any work.
+ 
+ ## Frontend (Vercel or any static host)
+ ```bash
+@@ -46,22 +46,22 @@ Set `VITE_API_BASE_URL` (e.g. `https://api.example.com`). `VITE_BACKEND_WS_URL`
+ | `MAX_WORKER_SLOTS` | 4 | |
+ | `MEMORY_ALERT_THRESHOLD_PCT` | 82 | |
+ | `LOG_LEVEL` | INFO | |
+-| `DRY_RUN_MODE` | false | defined but not applied at startup |
++| `DRY_RUN_MODE` | false | `true` forces dry-run ON at every boot (it never forces it off; the dashboard toggle is saved). Recommended for the first boot of a new deployment |
+ 
+ ## First-run checklist
+ 1. Log in as `admin` with `MASTER_PASSWORD`; enable TOTP (see REFERENCE.md, "Enabling 2FA").
+ 2. Settings > System: set the master seed (or unlock an existing one).
+ 3. Add a chain (RPC list, gas token, warning/critical balances, optional CoinGecko id); verify with Test RPCs.
+ 4. Generate or import wallets (imported keys may include a `0x` prefix); mark one or more as gas wallets; fund from faucets.
+-5. Turn dry-run **on**, add a project and task, run the task manually, read the Logs page.
+-6. Turn dry-run off when results look right.
++5. Start with dry-run **on** (`DRY_RUN_MODE=true` for the first boot, or the System panel), add a project and task, run the task manually, read the Logs page.
++6. Turn dry-run off when results look right (System panel; the choice is saved). If `DRY_RUN_MODE=true` is still in `.env` it will switch itself back on at the next restart, so set it to `false` first.
+ 7. Telegram: add your id to `TELEGRAM_ALLOWED_USER_IDS`, then `/group_setup` in a private Topics group.
+ 
+ ## Updating
+ ```bash
+ git pull && pip install -r backend/requirements.txt && sudo systemctl restart airdrop-agent
+ ```
+-On restart, SQLite databases get any new model columns added automatically (check the log for "Added missing columns"). Renames, drops and NOT NULL columns without a default still need manual SQL. Back up `airdrop.db` before upgrading.
++On restart, SQLite databases get any new model columns and tables added automatically (check the log for "Added missing columns"). Renames, drops and NOT NULL columns without a default still need manual SQL. Back up `airdrop.db` before upgrading.
+ 
+ Upgrading across the auth hardening change signs everyone out once (old tokens have no `type`).
+ 
+@@ -70,7 +70,9 @@ Upgrading across the auth hardening change signs everyone out once (old tokens h
+ |---|---|
+ | Service exits at start: "Refusing to start with unsafe secrets" | `SECRET_KEY` < 32 chars/placeholder, or `MASTER_PASSWORD` empty/< 8/placeholder |
+ | HD wallets never run after restart | master seed locked; unlock it |
+-| Everything silently stops | emergency stop or dry-run is set (both reset on restart) |
++| Everything silently stops | emergency stop or dry-run is set (both survive restarts now; check the System panel) |
++| A wallet is idle although it has work | pacing: it is in its sleep window, its task is not due yet (`frequency_mins`), or it has not reached its start offset for the day |
++| Reports say "none recorded" for gas | no transaction with fee data in that period (older rows have none) |
+ | Tasks skipped as `low_gas` | wallet gas balance below estimate x 1.2 |
+ | `nonce too low` | stored nonce behind chain; sync from Wallets > Manage |
+ | Live log blank | wrong `VITE_BACKEND_WS_URL` or CORS origin |
+diff --git a/docs/HOW-IT-WORKS.md b/docs/HOW-IT-WORKS.md
+index b874679..29fd1ec 100644
+--- a/docs/HOW-IT-WORKS.md
++++ b/docs/HOW-IT-WORKS.md
+@@ -3,8 +3,18 @@
+ ## 1. From project to transaction
+ 1. **Add a project** (website wizard or Telegram wizard): details, chains, socials, a task config, then optional criteria (AI can *draft* criteria from a docs URL; a human must accept).
+ 2. Every 30 s `fill_queue` takes active projects (not paused/stopped/archived, circuit breaker off, eligibility not declared) and splits free worker slots by `priority / total_priority`, capped by `max_concurrent_wallets`.
+-3. For each project, candidate (wallet, task) pairs are filtered: wallet active and not a gas wallet; HD wallets excluded while the seed is locked; inside the wallet's active hours; no active task for that wallet/chain; chain enabled; daily target not reached; dependency tasks completed today. Least-recently-selected wallets sort first.
+-4. A free worker slot runs `BaseTask.execute()`.
++3. For each project, candidate (wallet, task) pairs are filtered: wallet active and not a gas wallet; HD wallets excluded while the seed is locked; inside the wallet's active hours **and past its personal start offset** for the day; **past its sleep time** (`Wallet.next_available_at`); no active task for that wallet/chain; **the task itself is due** (`TaskSchedule.next_run_at`); chain enabled; daily target not reached; dependency tasks completed today. Each wallet contributes one candidate per cycle (a random one of its due tasks), and one task per wallet across all projects in a fill. Least-recently-selected wallets sort first (`last_selected_at` is written when a wallet is selected).
++4. A free worker slot runs `BaseTask.execute()`. When it ends, the outcome sets the pacing below.
++
++### Pacing (human-like behaviour, `core/scheduling.py`)
++| After | Same wallet+task is due again after | Wallet is idle for |
++|---|---|---|
++| success | `frequency_mins` x U(0.8, 1.4) | `sleep_min_mins`..`sleep_max_mins` (persona/settings) |
++| failed / timeout | about 10 min x U(0.8, 1.5) | same |
++| skipped (gas spike, low gas, paused contract, memory pressure) | U(3, 8) min | same |
++| simulated (dry-run) | not recorded | not recorded |
++
++After the active window opens, each wallet waits a personal, deterministic offset in `[0, start_offset_max_mins]` (different per wallet and per day) before its first task, so wallets that share a window don't all fire in the first cycle. Consequence: with `frequency_mins=120` and a 12 h window a wallet completes roughly 5-6 tasks a day, so keep `daily_tx_min/max` and `frequency_mins` consistent or targets will read as unmet. Manual triggers are not paced and do not move the schedule.
+ 
+ ## 2. The execution pipeline (`tasks/base.py`)
+ 1. Connect to chain (RPC pool, fallbacks).
+@@ -31,12 +41,13 @@
+ ## 3. Safety switches
+ | Switch | Scope | Persistence |
+ |---|---|---|
+-| Emergency stop (`/agent_kill`, `POST /agent/kill`) | halts dispatch, clears queue, stops loop; cannot un-broadcast a sent tx | **in memory only** |
+-| Dry-run | simulate everything, broadcast nothing; also pauses automatic queue filling | **in memory only**; `DRY_RUN_MODE` env is not read |
++| Emergency stop (`/agent_kill`, `/agent_pause_all`, `POST /agent/kill`) | halts dispatch, clears queue, stops loop; cannot un-broadcast a sent tx | **persisted** (`kill_switch_state`); stays on after a restart until cleared (dashboard "Clear emergency stop" or `/agent_resume_all`) |
++| Dry-run | simulate everything, broadcast nothing; also pauses automatic queue filling | **persisted**. `DRY_RUN_MODE=true` in `.env` additionally forces it ON at every boot (it can never force it off) |
+ | AI-autonomy freeze | stops only AI-made changes | persisted in `ai_autonomy_state` |
++| Agent stop (`/agent_stop`, `POST /agent/stop`) | stops the loop only, no emergency | not persisted: the loop starts again at boot |
+ | Maintenance window command | not enforced by the scheduler | n/a |
+ 
+-After a restart, dry-run and emergency stop reset (the agent may go live). Set the switches again.
++At startup the saved emergency-stop and dry-run state is restored **before** the scheduler and agent loop start. If that state cannot be read, the agent starts in emergency stop + dry-run (fail safe). A restart with the emergency stop active leaves the agent idle; clear it and start the agent. To run live permanently set `DRY_RUN_MODE=false` and switch dry-run off in the dashboard (that choice is saved).
+ 
+ ## 4. AI behaviour
+ - **Gemini** (primary) and **Groq** (validator) run concurrently. Only decision fields (`status`, `recommendation`, `approved`, `kyc_required`, confidence bucket, `risk_level`) are compared. Agreement >= 70% proceeds; below that, or if Groq is unavailable, the result is flagged for a human.
+@@ -64,7 +75,7 @@ Guardrails: max 10 adjustments per target per 24 h; max 5 AI reviews per cycle;
+ ## 6. Reports
+ Daily (08:00 UTC), weekly (Mon 08:10), monthly (1st 08:15) cover wallets, tasks completed/failed/skipped, success rate, gas spent, top projects, top failure causes, open alerts and circuit breakers.
+ 
+-**Gas figures:** `gas_cost_usd` is written for new transactions (native fee x the chain's CoinGecko price). Transactions recorded before this change have no fee data and still read 0. On testnets the USD figure is **not meaningful** (it prices a testnet token at its mainnet value); `gas_cost_native` is the factual number, but the reports still aggregate the USD column.
++**Gas figures** are reported in each chain's own gas token, per token, never summed across tokens: for example `0.0035 ETH · 0.0004 BNB`. This covers the dashboard overview (24h / 7d / all-time and per project), the daily/weekly/monthly reports, `/report_gas`, `/report_weekly`, gas per wallet, wallet compare, the daily-summary alert and the AI analyst (whose gas-spike flag also works per token). "Gas spent" includes reverted transactions (they burn gas) and does not include transactions recorded before fee tracking existed. API payloads still carry `gas_usd`, but that is an estimate (a testnet token priced at its mainnet value, empty if CoinGecko fails) and is no longer used in any report text.
+ 
+ ## 7. Eligibility
+-Per-wallet progress comes from criteria (tx count, volume, time, governance, token-hold, social). Two implementations exist (`reports/eligibility.py` and `projects/eligibility.py`) and they can disagree; volume uses `gas_cost_usd` as a proxy. Treat percentages as indicative. Declaring a project eligible or not-eligible (website only) permanently stops new tasks for it.
++Per-wallet progress comes from criteria (tx count, volume, time, governance, token-hold, social). Two implementations exist (`reports/eligibility.py` and `projects/eligibility.py`) and they can disagree; volume uses `gas_cost_usd` as a proxy (an estimate, empty when the price lookup fails). Treat percentages as indicative. Declaring a project eligible or not-eligible (website only) permanently stops new tasks for it.
+diff --git a/docs/REFERENCE.md b/docs/REFERENCE.md
+index c539c79..b56da17 100644
+--- a/docs/REFERENCE.md
++++ b/docs/REFERENCE.md
+@@ -14,10 +14,10 @@ All HTTP routes except those marked public require `Authorization: Bearer <acces
+ | `/proxies` | CRUD, assign, activate, test |
+ | `/ai` | validations list/detail/resolve, validate |
+ | `/autonomy` | status, pause, resume, actions, approve, undo |
+-| `/reports` | eligibility, gas, gas-spend, daily-progress, sybil, activity, server, summary, performance/*, export/{table} |
+-| `/stats` | `overview` |
++| `/reports` | eligibility, gas (per wallet/chain: `total_gas_native` + `gas_token`), gas-spend (`gas_spent_native` per token), daily-progress, sybil, activity, server, summary, performance/*, export/{table} |
++| `/stats` | `overview`: transaction windows (`last_24h`, `last_7d`, `all_time`) and `per_project` rows carry `gas_native` (per-token dict), `gas_native_text` and the legacy `gas_usd` estimate |
+ | `/claims` | `scan` (read-only, cached 10 min; `?refresh=true`) |
+-| `/ops` | project details/contracts/criteria/trigger-all/reset-circuit, task edit/trigger, wallet tags/recover/nonces/settings/persona re-roll, `transactions`, chain gas status, `system` (dry-run, emergency clear, archive logs, agent start/stop, seed unlock), `claims/*` |
++| `/ops` | project details/contracts/criteria/trigger-all/reset-circuit, task edit/trigger, wallet tags/recover/nonces/settings/persona re-roll, `transactions`, chain gas status, `system` (dry-run (persisted), emergency clear, archive logs, agent start/stop, seed unlock), `claims/*` |
+ | `/ws/logs` | WebSocket, `?token=<access jwt>`; closes with code 4001 otherwise. Events `log`, `status`, `heartbeat` |
+ | `/ws/recent-logs` | history of latest logs |
+ 
+diff --git a/docs/SECURITY.md b/docs/SECURITY.md
+index 41a72d4..7774e2f 100644
+--- a/docs/SECURITY.md
++++ b/docs/SECURITY.md
+@@ -28,7 +28,7 @@ Single operator. Threats: a stolen login/JWT, a compromised server, an exposed p
+ - `MASTER_PASSWORD` is both the admin login password and the key-encryption password. Changing it makes already-stored keys and seed undecryptable unless you re-encrypt them. Changing the env var does not change an existing admin login (that account is created once).
+ 
+ ## Guardrails against runaway automation
+-Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and logged AI actions, forbidden NL actions for secrets, Telegram confirmation flow, whitelisted Telegram ids, SSRF check on the criteria-draft URL fetch (http(s) only, blocks private, internal and cloud-metadata addresses).
++Emergency stop and dry-run (both persisted, restored before anything can dispatch, and fail-safe if the saved state cannot be read), AI-autonomy freeze, human-like pacing (no back-to-back bursts from one wallet), 70% agreement gate, bounded and logged AI actions, forbidden NL actions for secrets, Telegram confirmation flow, whitelisted Telegram ids, SSRF check on the criteria-draft URL fetch (http(s) only, blocks private, internal and cloud-metadata addresses).
+ 
+ ## Deliberate choices and known gaps
+ | Item | Status |
+@@ -37,7 +37,7 @@ Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and log
+ | Login rate limiting key | counts `request.client.host`, which is the proxy's address behind a tunnel, so one client can lock out others (and vice versa). Use the forwarded client IP if you add a trusted proxy. |
+ | JWT in `localStorage` | readable by any XSS. The refresh flow exists in the API but the dashboard does not use it. |
+ | `/agent_unlock <password>` | leaves the password in Telegram chat history; delete the message. |
+-| Dry-run / emergency stop | not persisted: both reset on restart. |
++| Agent stop | `/agent_stop` is not persisted (the loop restarts at boot); the emergency stop and dry-run **are** persisted. |
+ | Single secret | one `MASTER_PASSWORD` covers login and key encryption (splitting needs a re-encryption migration). |
+ | 2FA enrolment | API-only (no dashboard screen). Pending enrolments and failure counters are per-process memory. |
+ | CORS | allows only `https://airdrop-agent-wine.vercel.app`; change it in `main.py` if your frontend lives elsewhere. |
+@@ -51,7 +51,7 @@ Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and log
+ 5. Add systemd hardening (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths=` for the DB directory, `PrivateTmp=yes`).
+ 6. Keep the Telegram group private; whitelist only your id.
+ 7. Back up `airdrop.db` and your encrypted seed yourself. There is no built-in backup.
+-8. Treat dry-run and emergency-stop as non-persistent: re-apply after any restart.
++8. Dry-run and the emergency stop survive restarts. Set `DRY_RUN_MODE=true` for the first boot of a new deployment so nothing is broadcast until you have checked it, then switch dry-run off in the dashboard.
+ 
+ ## Before mainnet (not supported today)
+ Tighter autonomy rate limits, stricter agreement gate, human approval as default, separate key-encryption secret, pin dependencies, broader tests and CI.
+diff --git a/frontend/src/components/StatsOverview.jsx b/frontend/src/components/StatsOverview.jsx
+index 5735d88..8064c28 100644
+--- a/frontend/src/components/StatsOverview.jsx
++++ b/frontend/src/components/StatsOverview.jsx
+@@ -45,9 +45,9 @@ export default function StatsOverview() {
+       <div className="grid-stats">
+         <Card><StatTile label="Projects" value={d.projects.total} sub={`${d.projects.by_status.active || 0} active`} /></Card>
+         <Card><StatTile label="Wallets" value={d.wallets.total} tone="violet" sub={`${d.wallets.by_status.active || 0} active · ${d.wallets.gas_wallets} gas`} /></Card>
+-        <Card><StatTile label="Tx 24h" value={fmt(t24.total)} tone="signal" sub={`${sr(t24)} success · $${t24.gas_usd} gas`} /></Card>
+-        <Card><StatTile label="Tx 7d" value={fmt(t7.total)} sub={`${sr(t7)} success · $${t7.gas_usd} gas`} /></Card>
+-        <Card><StatTile label="All time" value={fmt(all.total)} sub={`${sr(all)} success · $${all.gas_usd} gas`} /></Card>
++        <Card><StatTile label="Tx 24h" value={fmt(t24.total)} tone="signal" sub={`${sr(t24)} success · ${t24.gas_native_text} gas`} /></Card>
++        <Card><StatTile label="Tx 7d" value={fmt(t7.total)} sub={`${sr(t7)} success · ${t7.gas_native_text} gas`} /></Card>
++        <Card><StatTile label="All time" value={fmt(all.total)} sub={`${sr(all)} success · ${all.gas_native_text} gas`} /></Card>
+         <Card><StatTile label="Open alerts" value={d.alerts_unresolved} tone={d.alerts_unresolved ? 'amber' : 'default'}
+           sub={d.ai ? `${d.ai.pending_suggestions} AI suggestion(s)` : undefined} /></Card>
+       </div>
+@@ -86,7 +86,7 @@ export default function StatsOverview() {
+               { key: 'tx', label: 'Tx ok / fail', num: true, render: p => <span className="mono">{p.tx_confirmed} / {p.tx_failed}</span> },
+               { key: 'wallets', label: 'Wallets', num: true, render: p => <span className="mono">{p.wallets}</span> },
+               { key: 'days', label: 'Active days', num: true, render: p => <span className="mono">{p.active_days}</span> },
+-              { key: 'gas', label: 'Gas $', num: true, render: p => <span className="mono">${p.gas_usd}</span> },
++              { key: 'gas', label: 'Gas', num: true, render: p => <span className="mono">{p.gas_native_text}</span> },
+               { key: 'last', label: 'Last tx', render: p => <span className="faint" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{ago(p.last_tx_at)}</span> },
+             ]}
+           />
+diff --git a/frontend/src/components/SystemPanel.jsx b/frontend/src/components/SystemPanel.jsx
+index 6f3b645..0505c7f 100644
+--- a/frontend/src/components/SystemPanel.jsx
++++ b/frontend/src/components/SystemPanel.jsx
+@@ -86,7 +86,7 @@ export default function SystemPanel() {
+           </div>
+           <p className="hint faint">
+             Dry-run: tasks you trigger manually are simulated and nothing is broadcast, and automatic queue filling is paused while it is on.
+-            It is kept in memory and resets to OFF on restart.
++            The setting is saved and survives restarts (DRY_RUN_MODE=true in .env also forces it on at every boot). The emergency stop is saved the same way and stays active after a restart until you clear it.
+           </p>
+         </div>
+       )}

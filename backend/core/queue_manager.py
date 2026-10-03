@@ -13,7 +13,8 @@ from backend.projects.manager import list_task_configs
 from backend.wallet.manager import list_wallets, get_wallet_settings
 from backend.chains.manager import get_chain
 from backend.core.daily_targets import get_or_create_daily_target
-from backend.wallet.behavior_randomizer import is_in_active_hours, get_start_offset_seconds
+from backend.wallet.behavior_randomizer import is_in_active_hours, has_started_for_the_day
+from backend.core.scheduling import load_schedule_map, utcnow_naive
 
 logger = logging.getLogger("airdrop.queue_manager")
 
@@ -92,6 +93,7 @@ async def fill_queue(worker_pool) -> None:
         # Proportional fill: allocate slots to projects by weight
         to_enqueue = []
         remaining = free_slots
+        chosen_wallets = set()   # one task per wallet per fill, even across projects
 
         for proj_id, bucket in project_buckets.items():
             if remaining <= 0:
@@ -100,24 +102,28 @@ async def fill_queue(worker_pool) -> None:
             allocation = max(1, round(bucket["weight"] * free_slots))
             allocation = min(allocation, bucket["cap"], remaining, len(bucket["candidates"]))
 
-            selected = bucket["candidates"][:allocation]
+            selected = []
+            for cand in bucket["candidates"]:
+                if len(selected) >= allocation:
+                    break
+                if cand["wallet"].id in chosen_wallets:
+                    continue
+                selected.append(cand)
+                chosen_wallets.add(cand["wallet"].id)
             to_enqueue.extend(selected)
             remaining -= len(selected)
 
         # Randomize order within selections to avoid pattern
         random.shuffle(to_enqueue)
         if to_enqueue:
+            # Record the selection so least-recently-used ordering actually rotates wallets
+            # (last_selected_at was never written before). These wallet objects belong to `db`.
+            now = utcnow_naive()
+            for item in to_enqueue:
+                item["wallet"].last_selected_at = now
+            await db.commit()
             await worker_pool.enqueue(to_enqueue)
             logger.info(f"Enqueued {len(to_enqueue)} tasks across {len(project_buckets)} projects")
-            # Apply wall-clock stagger delays so wallets don't all fire at once.
-            # We schedule each item's actual execution delay via a tiny wrapper
-            # that sleeps offset_secs before making the slot visible to workers.
-            # Simplest safe approach: sleep proportional to queue position so
-            # enqueued items spread out naturally without needing extra tasks.
-            for i, item in enumerate(to_enqueue):
-                delay = item.get("delay_seconds", 0)
-                if delay and i > 0:
-                    await asyncio.sleep(min(delay, 30))  # cap at 30 s per item
 
 
 async def _get_project_candidates(db: AsyncSession, project: Project, worker_pool) -> list:
@@ -146,13 +152,24 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
         return []
 
     candidates = []
-    today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    now_utc = datetime.now(timezone.utc)
+    now_naive = utcnow_naive()
+    today_str = now_utc.strftime("%Y-%m-%d")
+    # H4: when each (wallet, task) is next due, loaded once for the whole project.
+    schedule = await load_schedule_map(db, [t.id for t in enabled_tasks])
 
     for wallet in wallets:
         settings = await get_wallet_settings(db, wallet.id)
 
         # Active hours check
         if not is_in_active_hours(settings):
+            continue
+
+        # H4: wallet "sleep" between any two tasks, and the personal start offset after the
+        # active window opens (so wallets sharing a window don't all fire in the first cycle).
+        if wallet.next_available_at and wallet.next_available_at > now_naive:
+            continue
+        if not has_started_for_the_day(settings, wallet.id, now_utc):
             continue
 
         # Check if wallet already has active task on any chain
@@ -165,6 +182,11 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
         for task_config in enabled_tasks:
             # Nonce safety: skip if wallet+chain already active
             if await _has_active_task(db, wallet.id, task_config.chain_id):
+                continue
+
+            # H4: this task ran (or was deferred) recently; honour frequency_mins / backoff.
+            due = schedule.get((wallet.id, task_config.id))
+            if due is not None and due > now_naive:
                 continue
 
             # Check chain is enabled
@@ -185,23 +207,23 @@ async def _get_project_candidates(db: AsyncSession, project: Project, worker_poo
                 if not deps_met:
                     continue
 
-            # Calculate staggered start offset
-            offset_secs = get_start_offset_seconds(settings)
-
             candidates.append({
                 "wallet": wallet,
                 "task_config": task_config,
                 "project": project,
                 "chain": chain,
                 "priority": project.priority,
-                "delay_seconds": offset_secs,
             })
 
-    # Sort: least-recently-used wallets first, then by start delay
-    candidates.sort(key=lambda x: (
-        x["wallet"].last_selected_at or datetime.min.replace(tzinfo=timezone.utc),
-        x["delay_seconds"],
-    ))
+    # One candidate per wallet (a random one of its due tasks): a wallet must not be handed two
+    # actions in the same cycle, which would bypass the sleep rule above.
+    by_wallet = {}
+    for c in candidates:
+        by_wallet.setdefault(c["wallet"].id, []).append(c)
+    candidates = [random.choice(v) for v in by_wallet.values()]
+
+    # Sort: least-recently-selected wallets first (never-selected first); random tiebreak.
+    candidates.sort(key=lambda x: (x["wallet"].last_selected_at or datetime.min, random.random()))
     return candidates
 
 

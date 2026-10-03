@@ -58,6 +58,9 @@ async def _facts(db: AsyncSession, hours: int) -> dict:
         ).where(Transaction.created_at >= since)
     )).one()
 
+    from backend.reports.gas_native import gas_native_totals, format_gas_native
+    gas_native = await gas_native_totals(db, since=since)
+
     outcome_rows = (await db.execute(
         select(TaskFailure.outcome, func.count()).where(TaskFailure.created_at >= since).group_by(TaskFailure.outcome)
     )).all()
@@ -103,6 +106,7 @@ async def _facts(db: AsyncSession, hours: int) -> dict:
         "wallets": wallets, "gas_wallets": int(gas_wallets), "wallets_active_in_window": int(wallets_active or 0),
         "completed": int(confirmed or 0), "failed": int(outcomes.get("failed", 0)),
         "skipped": int(outcomes.get("skipped", 0)), "gas_usd": round(float(gas_usd or 0), 2),
+        "gas_native": {k: round(v, 8) for k, v in gas_native.items()}, "gas_native_text": format_gas_native(gas_native),
         "causes": [(c, n) for c, n in causes], "top_projects": [(p, n) for p, n in top_projects],
         "failing_projects": [(p, n) for p, n in failing_projects],
         "targets_met": targets_met, "targets_total": len(prog),
@@ -127,7 +131,7 @@ def _render(kind: str, title: str, hours: int, f: dict, narrative: Optional[str]
         f"   {f['wallets_active_in_window']} wallet(s) completed at least one task in this period",
         "",
         f"✅ Tasks completed: {done}   ❌ failed: {failed}   ⏭ skipped: {f['skipped']}   success rate: {rate}",
-        f"⛽ Gas spent: ${f['gas_usd']}",
+        f"⛽ Gas spent: {f['gas_native_text']}",
     ]
     if f["top_projects"]:
         lines += ["", "📁 Most active projects: " + " · ".join(f"{p} {n}" for p, n in f["top_projects"])]

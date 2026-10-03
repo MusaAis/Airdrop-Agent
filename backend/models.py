@@ -111,6 +111,8 @@ class Wallet(Base):
     failure_count: Mapped[int] = mapped_column(Integer, default=0)
     last_active: Mapped[Optional[datetime]] = mapped_column(DateTime)
     last_selected_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
+    # Wallet-level "sleep": no new task is dispatched for this wallet before this time (naive UTC).
+    next_available_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     warmup_complete: Mapped[bool] = mapped_column(Boolean, default=False)
     warmup_started_at: Mapped[Optional[datetime]] = mapped_column(DateTime)
     sybil_risk_score: Mapped[int] = mapped_column(Integer, default=0)

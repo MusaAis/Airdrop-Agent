@@ -27,7 +27,8 @@ async def handle_report_gas(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     chain_id = int(args[0]) if args else None
     data = await get_gas_usage_report(db, chain_id)
-    return "\n".join(f"{r['wallet'][:10]}... chain {r['chain']}: ${r['total_gas_usd']} ({r['tx_count']} tx)" for r in data)
+    if not data: return "No gas data recorded yet."
+    return "\n".join(f"{r['wallet'][:10]}... chain {r['chain']}: {r['total_gas_native']:.6g} {r['gas_token']} ({r['tx_count']} tx)" for r in data)
 
 async def handle_report_sybil(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
@@ -84,8 +85,11 @@ async def handle_report_weekly(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
     from backend.reports.activity import get_activity_log
     from backend.reports.gas_spend import get_gas_spend_report
+    from datetime import datetime, timedelta
+    from backend.reports.gas_native import gas_native_totals, format_gas_native
     logs = await get_activity_log(db, hours=168); spend = await get_gas_spend_report(db, None)
-    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in spend if 'project' in r})}\nGas spent: ${sum(r.get('gas_spent_usd',0) for r in spend):.2f}"
+    gas = await gas_native_totals(db, since=datetime.utcnow() - timedelta(hours=168))
+    return f"📊 Weekly Summary\nTransactions: {len(logs)}\nProjects: {len({r['project'] for r in spend if 'project' in r})}\nGas spent (7d): {format_gas_native(gas)}"
 
 async def handle_report_snapshot(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
@@ -129,11 +133,12 @@ async def handle_report_compare(user_id, args, db, confirmation=None):
     if not w1 or not w2: return "Wallet not found."
     async def stats(wid):
         cnt = (await db.execute(_s(func.count(Transaction.id)).where(Transaction.wallet_id==wid))).scalar() or 0
-        gas = (await db.execute(_s(func.sum(Transaction.gas_cost_usd)).where(Transaction.wallet_id==wid))).scalar() or 0
+        from backend.reports.gas_native import gas_native_totals, format_gas_native
+        gas = format_gas_native(await gas_native_totals(db, wallet_id=wid))
         fail= (await db.execute(_s(func.count(Transaction.id)).where(Transaction.wallet_id==wid,Transaction.status=="failed"))).scalar() or 0
         return cnt,gas,fail
     c1,g1,f1 = await stats(w1.id); c2,g2,f2 = await stats(w2.id)
-    return f"Wallet {w1.id} vs {w2.id}\nTxs: {c1} vs {c2}\nGas$: {g1:.2f} vs {g2:.2f}\nFailed: {f1} vs {f2}\nHealth: {w1.health_score} vs {w2.health_score}"
+    return f"Wallet {w1.id} vs {w2.id}\nTxs: {c1} vs {c2}\nGas: {g1} vs {g2}\nFailed: {f1} vs {f2}\nHealth: {w1.health_score} vs {w2.health_score}"
 
 async def handle_report_project(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"

@@ -4,10 +4,11 @@
 One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On startup (`backend/main.py`):
 1. `enforce_startup_secrets()` aborts the process if `SECRET_KEY` / `MASTER_PASSWORD` are unsafe (before anything touches the database).
 2. `init_db()` enables SQLite WAL, runs `create_all()`, then adds any missing columns to existing SQLite tables. Ensures an `admin` user exists (password = `MASTER_PASSWORD`, created on first start only).
-3. `load_autonomy_state()` restores the persisted AI-autonomy freeze flag.
-4. `start_scheduler()` starts APScheduler jobs.
-5. `start_agent()` starts the agent loop (sets `agent_task`, so stop/kill can cancel it).
-6. The Telegram bot starts if `TELEGRAM_BOT_TOKEN` is set.
+3. `load_kill_switch_state()` restores the persisted emergency stop and dry-run flags (`DRY_RUN_MODE=true` forces dry-run on). It runs before anything can dispatch work and fails safe (emergency stop + dry-run) if the state cannot be read.
+4. `load_autonomy_state()` restores the persisted AI-autonomy freeze flag.
+5. `start_scheduler()` starts APScheduler jobs.
+6. `start_agent()` starts the agent loop (sets `agent_task`, so stop/kill can cancel it).
+7. The Telegram bot starts if `TELEGRAM_BOT_TOKEN` is set.
 
 ```
  React dashboard (Vercel) ──HTTPS/WSS──┐
@@ -29,15 +30,16 @@ One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On sta
 | Area | Modules | Responsibility |
 |---|---|---|
 | Agent loop | `agent.py` | every 30 s: `fill_queue` + `monitor_pending_transactions` (skipped during emergency stop or dry-run); 60 s heartbeat; frozen-slot watchdog |
-| Queue | `core/queue_manager.py` | priority-weighted fill; candidate filtering (active hours, daily target, dependencies, nonce safety, master-seed lock) |
-| Workers | `core/worker_pool.py` | `MAX_WORKER_SLOTS` slots, 480 s task timeout, outcome recording, circuit breaker and cooldown counters, `Log` rows |
+| Queue | `core/queue_manager.py` | priority-weighted fill; candidate filtering (active hours, personal start offset, wallet sleep, task due time, daily target, dependencies, nonce safety, master-seed lock); one task per wallet per fill |
+| Pacing | `core/scheduling.py`, `wallet/behavior_randomizer.py` | `TaskSchedule.next_run_at` and `Wallet.next_available_at` after every real attempt; deterministic per-wallet-per-day start offset |
+| Workers | `core/worker_pool.py` | `MAX_WORKER_SLOTS` slots, 480 s task timeout, outcome recording, pacing hook, circuit breaker and cooldown counters, `Log` rows |
 | Tasks | `tasks/*` | `BaseTask.execute` pipeline; one subclass per task type |
-| Safety | `core/kill_switch.py`, `gas_spike_guard.py`, `memory_guard.py`, `nonce_manager.py`, `stuck_tx_handler.py` | emergency stop, dry-run, AI freeze, gas deferral, RAM pause, nonce locks, speed-up/cancel |
+| Safety | `core/kill_switch.py`, `gas_spike_guard.py`, `memory_guard.py`, `nonce_manager.py`, `stuck_tx_handler.py` | persisted emergency stop and dry-run (`kill_switch_state`), AI freeze, gas deferral, RAM pause, nonce locks, speed-up/cancel |
 | AI | `ai/*`, `core/failure_analysis.py`, `core/autonomy.py`, `reports/analyst.py` | validation, clustering, bounded actions, narration |
 | Wallets | `wallet/*` | HD derivation, encryption, persona, balances, Sybil detection |
 | Chains | `chains/*` | RPC pool/failover, gas sampling, price oracle, token registry, contract watcher |
 | Security | `security/*` | typed JWTs, TOTP, brute-force lockout, device trust, startup secret checks |
-| Reports | `reports/*` | all numbers are DB queries; `periodic.py` builds daily/weekly/monthly Telegram reports |
+| Reports | `reports/*` | all numbers are DB queries; `periodic.py` builds daily/weekly/monthly Telegram reports; `gas_native.py` is the single source for per-token gas totals |
 | Interfaces | `api/routes/*`, `telegram/*`, `frontend/` | control surfaces |
 
 ## Scheduled jobs (`core/scheduler.py`)
@@ -58,10 +60,11 @@ One Python process (`python3 -m backend.main`, uvicorn) hosts everything. On sta
 ## Data model (SQLite, `backend/models.py` plus module-registered tables)
 - **Identity/config**: `users`, `agent_secrets` (encrypted master mnemonic), `agent_status`, `login_attempts`
 - **Chains**: `chains` (incl. `coingecko_id`), `chain_tokens`, `rpc_request_log`
-- **Wallets**: `wallets`, `wallet_settings`, `wallet_balances`, `wallet_nonces`, `proxies`
-- **Projects**: `projects`, `project_contracts`, `project_criteria`, `task_configs`, `task_daily_progress`, `task_schedule` (unused), `active_tasks`, `completed_projects_blacklist` (unenforced)
+- **Wallets**: `wallets` (incl. `next_available_at`), `wallet_settings`, `wallet_balances`, `wallet_nonces`, `proxies`
+- **Projects**: `projects`, `project_contracts`, `project_criteria`, `task_configs`, `task_daily_progress`, `task_schedule` (per wallet+task `next_run_at` / `last_run_at`), `active_tasks`, `completed_projects_blacklist` (unenforced)
 - **Execution**: `transactions` (incl. `gas_used`, `gas_token`, `gas_cost_native`, `gas_cost_usd`, `error_message`), `token_approvals`, `task_failures` (30-day retention), `logs`, `logs_archive`
 - **AI**: `ai_validations`, `ai_actions`, `ai_autonomy_state`
+- **Safety state**: `kill_switch_state` (single row: emergency stop, dry-run)
 - **Other**: `faucets`, `faucet_tokens`, `faucet_requests`, `alerts`, `telegram_routes`, `competitor_wallets`
 
 ### Schema changes

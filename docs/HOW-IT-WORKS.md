@@ -3,8 +3,18 @@
 ## 1. From project to transaction
 1. **Add a project** (website wizard or Telegram wizard): details, chains, socials, a task config, then optional criteria (AI can *draft* criteria from a docs URL; a human must accept).
 2. Every 30 s `fill_queue` takes active projects (not paused/stopped/archived, circuit breaker off, eligibility not declared) and splits free worker slots by `priority / total_priority`, capped by `max_concurrent_wallets`.
-3. For each project, candidate (wallet, task) pairs are filtered: wallet active and not a gas wallet; HD wallets excluded while the seed is locked; inside the wallet's active hours; no active task for that wallet/chain; chain enabled; daily target not reached; dependency tasks completed today. Least-recently-selected wallets sort first.
-4. A free worker slot runs `BaseTask.execute()`.
+3. For each project, candidate (wallet, task) pairs are filtered: wallet active and not a gas wallet; HD wallets excluded while the seed is locked; inside the wallet's active hours **and past its personal start offset** for the day; **past its sleep time** (`Wallet.next_available_at`); no active task for that wallet/chain; **the task itself is due** (`TaskSchedule.next_run_at`); chain enabled; daily target not reached; dependency tasks completed today. Each wallet contributes one candidate per cycle (a random one of its due tasks), and one task per wallet across all projects in a fill. Least-recently-selected wallets sort first (`last_selected_at` is written when a wallet is selected).
+4. A free worker slot runs `BaseTask.execute()`. When it ends, the outcome sets the pacing below.
+
+### Pacing (human-like behaviour, `core/scheduling.py`)
+| After | Same wallet+task is due again after | Wallet is idle for |
+|---|---|---|
+| success | `frequency_mins` x U(0.8, 1.4) | `sleep_min_mins`..`sleep_max_mins` (persona/settings) |
+| failed / timeout | about 10 min x U(0.8, 1.5) | same |
+| skipped (gas spike, low gas, paused contract, memory pressure) | U(3, 8) min | same |
+| simulated (dry-run) | not recorded | not recorded |
+
+After the active window opens, each wallet waits a personal, deterministic offset in `[0, start_offset_max_mins]` (different per wallet and per day) before its first task, so wallets that share a window don't all fire in the first cycle. Consequence: with `frequency_mins=120` and a 12 h window a wallet completes roughly 5-6 tasks a day, so keep `daily_tx_min/max` and `frequency_mins` consistent or targets will read as unmet. Manual triggers are not paced and do not move the schedule.
 
 ## 2. The execution pipeline (`tasks/base.py`)
 1. Connect to chain (RPC pool, fallbacks).
@@ -31,12 +41,13 @@
 ## 3. Safety switches
 | Switch | Scope | Persistence |
 |---|---|---|
-| Emergency stop (`/agent_kill`, `POST /agent/kill`) | halts dispatch, clears queue, stops loop; cannot un-broadcast a sent tx | **in memory only** |
-| Dry-run | simulate everything, broadcast nothing; also pauses automatic queue filling | **in memory only**; `DRY_RUN_MODE` env is not read |
+| Emergency stop (`/agent_kill`, `/agent_pause_all`, `POST /agent/kill`) | halts dispatch, clears queue, stops loop; cannot un-broadcast a sent tx | **persisted** (`kill_switch_state`); stays on after a restart until cleared (dashboard "Clear emergency stop" or `/agent_resume_all`) |
+| Dry-run | simulate everything, broadcast nothing; also pauses automatic queue filling | **persisted**. `DRY_RUN_MODE=true` in `.env` additionally forces it ON at every boot (it can never force it off) |
 | AI-autonomy freeze | stops only AI-made changes | persisted in `ai_autonomy_state` |
+| Agent stop (`/agent_stop`, `POST /agent/stop`) | stops the loop only, no emergency | not persisted: the loop starts again at boot |
 | Maintenance window command | not enforced by the scheduler | n/a |
 
-After a restart, dry-run and emergency stop reset (the agent may go live). Set the switches again.
+At startup the saved emergency-stop and dry-run state is restored **before** the scheduler and agent loop start. If that state cannot be read, the agent starts in emergency stop + dry-run (fail safe). A restart with the emergency stop active leaves the agent idle; clear it and start the agent. To run live permanently set `DRY_RUN_MODE=false` and switch dry-run off in the dashboard (that choice is saved).
 
 ## 4. AI behaviour
 - **Gemini** (primary) and **Groq** (validator) run concurrently. Only decision fields (`status`, `recommendation`, `approved`, `kyc_required`, confidence bucket, `risk_level`) are compared. Agreement >= 70% proceeds; below that, or if Groq is unavailable, the result is flagged for a human.
@@ -64,7 +75,7 @@ Guardrails: max 10 adjustments per target per 24 h; max 5 AI reviews per cycle; 
 ## 6. Reports
 Daily (08:00 UTC), weekly (Mon 08:10), monthly (1st 08:15) cover wallets, tasks completed/failed/skipped, success rate, gas spent, top projects, top failure causes, open alerts and circuit breakers.
 
-**Gas figures:** `gas_cost_usd` is written for new transactions (native fee x the chain's CoinGecko price). Transactions recorded before this change have no fee data and still read 0. On testnets the USD figure is **not meaningful** (it prices a testnet token at its mainnet value); `gas_cost_native` is the factual number, but the reports still aggregate the USD column.
+**Gas figures** are reported in each chain's own gas token, per token, never summed across tokens: for example `0.0035 ETH · 0.0004 BNB`. This covers the dashboard overview (24h / 7d / all-time and per project), the daily/weekly/monthly reports, `/report_gas`, `/report_weekly`, gas per wallet, wallet compare, the daily-summary alert and the AI analyst (whose gas-spike flag also works per token). "Gas spent" includes reverted transactions (they burn gas) and does not include transactions recorded before fee tracking existed. API payloads still carry `gas_usd`, but that is an estimate (a testnet token priced at its mainnet value, empty if CoinGecko fails) and is no longer used in any report text.
 
 ## 7. Eligibility
-Per-wallet progress comes from criteria (tx count, volume, time, governance, token-hold, social). Two implementations exist (`reports/eligibility.py` and `projects/eligibility.py`) and they can disagree; volume uses `gas_cost_usd` as a proxy. Treat percentages as indicative. Declaring a project eligible or not-eligible (website only) permanently stops new tasks for it.
+Per-wallet progress comes from criteria (tx count, volume, time, governance, token-hold, social). Two implementations exist (`reports/eligibility.py` and `projects/eligibility.py`) and they can disagree; volume uses `gas_cost_usd` as a proxy (an estimate, empty when the price lookup fails). Treat percentages as indicative. Declaring a project eligible or not-eligible (website only) permanently stops new tasks for it.

@@ -45,9 +45,9 @@ export default function StatsOverview() {
       <div className="grid-stats">
         <Card><StatTile label="Projects" value={d.projects.total} sub={`${d.projects.by_status.active || 0} active`} /></Card>
         <Card><StatTile label="Wallets" value={d.wallets.total} tone="violet" sub={`${d.wallets.by_status.active || 0} active · ${d.wallets.gas_wallets} gas`} /></Card>
-        <Card><StatTile label="Tx 24h" value={fmt(t24.total)} tone="signal" sub={`${sr(t24)} success · $${t24.gas_usd} gas`} /></Card>
-        <Card><StatTile label="Tx 7d" value={fmt(t7.total)} sub={`${sr(t7)} success · $${t7.gas_usd} gas`} /></Card>
-        <Card><StatTile label="All time" value={fmt(all.total)} sub={`${sr(all)} success · $${all.gas_usd} gas`} /></Card>
+        <Card><StatTile label="Tx 24h" value={fmt(t24.total)} tone="signal" sub={`${sr(t24)} success · ${t24.gas_native_text} gas`} /></Card>
+        <Card><StatTile label="Tx 7d" value={fmt(t7.total)} sub={`${sr(t7)} success · ${t7.gas_native_text} gas`} /></Card>
+        <Card><StatTile label="All time" value={fmt(all.total)} sub={`${sr(all)} success · ${all.gas_native_text} gas`} /></Card>
         <Card><StatTile label="Open alerts" value={d.alerts_unresolved} tone={d.alerts_unresolved ? 'amber' : 'default'}
           sub={d.ai ? `${d.ai.pending_suggestions} AI suggestion(s)` : undefined} /></Card>
       </div>
@@ -86,7 +86,7 @@ export default function StatsOverview() {
               { key: 'tx', label: 'Tx ok / fail', num: true, render: p => <span className="mono">{p.tx_confirmed} / {p.tx_failed}</span> },
               { key: 'wallets', label: 'Wallets', num: true, render: p => <span className="mono">{p.wallets}</span> },
               { key: 'days', label: 'Active days', num: true, render: p => <span className="mono">{p.active_days}</span> },
-              { key: 'gas', label: 'Gas $', num: true, render: p => <span className="mono">${p.gas_usd}</span> },
+              { key: 'gas', label: 'Gas', num: true, render: p => <span className="mono">{p.gas_native_text}</span> },
               { key: 'last', label: 'Last tx', render: p => <span className="faint" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>{ago(p.last_tx_at)}</span> },
             ]}
           />

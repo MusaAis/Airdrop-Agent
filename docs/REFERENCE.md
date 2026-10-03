@@ -14,10 +14,10 @@ All HTTP routes except those marked public require `Authorization: Bearer <acces
 | `/proxies` | CRUD, assign, activate, test |
 | `/ai` | validations list/detail/resolve, validate |
 | `/autonomy` | status, pause, resume, actions, approve, undo |
-| `/reports` | eligibility, gas, gas-spend, daily-progress, sybil, activity, server, summary, performance/*, export/{table} |
-| `/stats` | `overview` |
+| `/reports` | eligibility, gas (per wallet/chain: `total_gas_native` + `gas_token`), gas-spend (`gas_spent_native` per token), daily-progress, sybil, activity, server, summary, performance/*, export/{table} |
+| `/stats` | `overview`: transaction windows (`last_24h`, `last_7d`, `all_time`) and `per_project` rows carry `gas_native` (per-token dict), `gas_native_text` and the legacy `gas_usd` estimate |
 | `/claims` | `scan` (read-only, cached 10 min; `?refresh=true`) |
-| `/ops` | project details/contracts/criteria/trigger-all/reset-circuit, task edit/trigger, wallet tags/recover/nonces/settings/persona re-roll, `transactions`, chain gas status, `system` (dry-run, emergency clear, archive logs, agent start/stop, seed unlock), `claims/*` |
+| `/ops` | project details/contracts/criteria/trigger-all/reset-circuit, task edit/trigger, wallet tags/recover/nonces/settings/persona re-roll, `transactions`, chain gas status, `system` (dry-run (persisted), emergency clear, archive logs, agent start/stop, seed unlock), `claims/*` |
 | `/ws/logs` | WebSocket, `?token=<access jwt>`; closes with code 4001 otherwise. Events `log`, `status`, `heartbeat` |
 | `/ws/recent-logs` | history of latest logs |
 

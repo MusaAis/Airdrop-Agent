@@ -17,7 +17,7 @@ The unit runs `/usr/bin/python3 -m backend.main` as user `ubuntu` with `Environm
 
 If the service exits immediately with "Refusing to start with unsafe secrets", read the journal: it lists exactly which value is wrong.
 
-After **every restart**: unlock the master seed (Settings > System, or `/agent_unlock <password>`), and re-set dry-run if you want it on.
+After **every restart**: unlock the master seed (Settings > System, or `/agent_unlock <password>`). Dry-run and the emergency stop are restored automatically; if the emergency stop was active, clear it before expecting any work.
 
 ## Frontend (Vercel or any static host)
 ```bash
@@ -46,22 +46,22 @@ Set `VITE_API_BASE_URL` (e.g. `https://api.example.com`). `VITE_BACKEND_WS_URL` 
 | `MAX_WORKER_SLOTS` | 4 | |
 | `MEMORY_ALERT_THRESHOLD_PCT` | 82 | |
 | `LOG_LEVEL` | INFO | |
-| `DRY_RUN_MODE` | false | defined but not applied at startup |
+| `DRY_RUN_MODE` | false | `true` forces dry-run ON at every boot (it never forces it off; the dashboard toggle is saved). Recommended for the first boot of a new deployment |
 
 ## First-run checklist
 1. Log in as `admin` with `MASTER_PASSWORD`; enable TOTP (see REFERENCE.md, "Enabling 2FA").
 2. Settings > System: set the master seed (or unlock an existing one).
 3. Add a chain (RPC list, gas token, warning/critical balances, optional CoinGecko id); verify with Test RPCs.
 4. Generate or import wallets (imported keys may include a `0x` prefix); mark one or more as gas wallets; fund from faucets.
-5. Turn dry-run **on**, add a project and task, run the task manually, read the Logs page.
-6. Turn dry-run off when results look right.
+5. Start with dry-run **on** (`DRY_RUN_MODE=true` for the first boot, or the System panel), add a project and task, run the task manually, read the Logs page.
+6. Turn dry-run off when results look right (System panel; the choice is saved). If `DRY_RUN_MODE=true` is still in `.env` it will switch itself back on at the next restart, so set it to `false` first.
 7. Telegram: add your id to `TELEGRAM_ALLOWED_USER_IDS`, then `/group_setup` in a private Topics group.
 
 ## Updating
 ```bash
 git pull && pip install -r backend/requirements.txt && sudo systemctl restart airdrop-agent
 ```
-On restart, SQLite databases get any new model columns added automatically (check the log for "Added missing columns"). Renames, drops and NOT NULL columns without a default still need manual SQL. Back up `airdrop.db` before upgrading.
+On restart, SQLite databases get any new model columns and tables added automatically (check the log for "Added missing columns"). Renames, drops and NOT NULL columns without a default still need manual SQL. Back up `airdrop.db` before upgrading.
 
 Upgrading across the auth hardening change signs everyone out once (old tokens have no `type`).
 
@@ -70,7 +70,9 @@ Upgrading across the auth hardening change signs everyone out once (old tokens h
 |---|---|
 | Service exits at start: "Refusing to start with unsafe secrets" | `SECRET_KEY` < 32 chars/placeholder, or `MASTER_PASSWORD` empty/< 8/placeholder |
 | HD wallets never run after restart | master seed locked; unlock it |
-| Everything silently stops | emergency stop or dry-run is set (both reset on restart) |
+| Everything silently stops | emergency stop or dry-run is set (both survive restarts now; check the System panel) |
+| A wallet is idle although it has work | pacing: it is in its sleep window, its task is not due yet (`frequency_mins`), or it has not reached its start offset for the day |
+| Reports say "none recorded" for gas | no transaction with fee data in that period (older rows have none) |
 | Tasks skipped as `low_gas` | wallet gas balance below estimate x 1.2 |
 | `nonce too low` | stored nonce behind chain; sync from Wallets > Manage |
 | Live log blank | wrong `VITE_BACKEND_WS_URL` or CORS origin |

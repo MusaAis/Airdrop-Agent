@@ -8,7 +8,7 @@ A self-hosted agent that farms testnet airdrops. It manages many EVM wallets, ru
 - **Wallets**: HD wallets from one master seed or imported private keys (encrypted at rest), tags, per-wallet persona (active hours, gas multiplier, daily tx range), health and Sybil scores.
 - **Chains**: primary + fallback RPCs, gas sampling every 10 min with spike detection, token registry, optional CoinGecko id for USD pricing.
 - **Projects and tasks**: priority-weighted queue, daily targets, dependencies, eligibility criteria, circuit breaker, soft-archive, manual eligibility declaration.
-- **Execution engine**: fixed worker slots, nonce locking synced to chain, pre-flight simulation, dry-run, stuck-tx speed-up/cancel, watchdog, per-transaction fee tracking.
+- **Execution engine**: fixed worker slots, nonce locking synced to chain, pre-flight simulation, persisted dry-run and emergency stop, stuck-tx speed-up/cancel, watchdog, per-transaction fee tracking, human-like pacing (frequency, sleep, per-day start offset).
 - **AI layer**: dual-model validation (70% agreement gate), failure-cluster analysis, bounded autonomous actions (pause wallet, gas multiplier, disable task, lower priority), all logged and undoable.
 - **Interfaces**: web dashboard (phone + desktop), Telegram bot (quick-action remote) and a Telegram group with topics for reports.
 
@@ -16,7 +16,7 @@ A self-hosted agent that farms testnet airdrops. It manages many EVM wallets, ru
 | Path | Purpose |
 |---|---|
 | `backend/` | FastAPI app, agent loop, scheduler, models |
-| `backend/core/` | queue, worker pool, nonce manager, kill switch, autonomy, failure analysis |
+| `backend/core/` | queue, pacing, worker pool, nonce manager, kill switch, autonomy, failure analysis |
 | `backend/tasks/` | task types (swap, bridge, stake, liquidity, transfer, generic) |
 | `backend/ai/` | Gemini/Groq clients, key pools, orchestrator, prompts |
 | `backend/security/` | JWT auth, TOTP, brute-force lockout, startup secret checks |
@@ -40,8 +40,11 @@ The server **refuses to start** with an empty/short/placeholder `SECRET_KEY` or 
 
 ## Tests
 ```bash
-python3 -m backend.test_security_fixes                                  # auth, secrets, 2FA, import, fees, migration
-TELEGRAM_ALLOWED_USER_IDS='["42"]' python3 -m backend.test_c2c3c4       # gas units, nonce, Telegram confirm flow
+python3 -m backend.test_security_fixes      # auth, secrets, 2FA, import, fees, column migration
+python3 -m backend.test_killswitch_persist  # emergency stop / dry-run survive restarts
+python3 -m backend.test_scheduling          # human-like pacing
+python3 -m backend.test_native_gas          # per-token gas in reports
+TELEGRAM_ALLOWED_USER_IDS='["42"]' python3 -m backend.test_c2c3c4   # gas units, nonce, Telegram confirm flow
 ```
 Both use throwaway SQLite files and need no network or chain.
 

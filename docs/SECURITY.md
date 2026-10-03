@@ -28,7 +28,7 @@ Single operator. Threats: a stolen login/JWT, a compromised server, an exposed p
 - `MASTER_PASSWORD` is both the admin login password and the key-encryption password. Changing it makes already-stored keys and seed undecryptable unless you re-encrypt them. Changing the env var does not change an existing admin login (that account is created once).
 
 ## Guardrails against runaway automation
-Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and logged AI actions, forbidden NL actions for secrets, Telegram confirmation flow, whitelisted Telegram ids, SSRF check on the criteria-draft URL fetch (http(s) only, blocks private, internal and cloud-metadata addresses).
+Emergency stop and dry-run (both persisted, restored before anything can dispatch, and fail-safe if the saved state cannot be read), AI-autonomy freeze, human-like pacing (no back-to-back bursts from one wallet), 70% agreement gate, bounded and logged AI actions, forbidden NL actions for secrets, Telegram confirmation flow, whitelisted Telegram ids, SSRF check on the criteria-draft URL fetch (http(s) only, blocks private, internal and cloud-metadata addresses).
 
 ## Deliberate choices and known gaps
 | Item | Status |
@@ -37,7 +37,7 @@ Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and log
 | Login rate limiting key | counts `request.client.host`, which is the proxy's address behind a tunnel, so one client can lock out others (and vice versa). Use the forwarded client IP if you add a trusted proxy. |
 | JWT in `localStorage` | readable by any XSS. The refresh flow exists in the API but the dashboard does not use it. |
 | `/agent_unlock <password>` | leaves the password in Telegram chat history; delete the message. |
-| Dry-run / emergency stop | not persisted: both reset on restart. |
+| Agent stop | `/agent_stop` is not persisted (the loop restarts at boot); the emergency stop and dry-run **are** persisted. |
 | Single secret | one `MASTER_PASSWORD` covers login and key encryption (splitting needs a re-encryption migration). |
 | 2FA enrolment | API-only (no dashboard screen). Pending enrolments and failure counters are per-process memory. |
 | CORS | allows only `https://airdrop-agent-wine.vercel.app`; change it in `main.py` if your frontend lives elsewhere. |
@@ -51,7 +51,7 @@ Emergency stop, dry-run, AI-autonomy freeze, 70% agreement gate, bounded and log
 5. Add systemd hardening (`NoNewPrivileges=yes`, `ProtectSystem=strict`, `ReadWritePaths=` for the DB directory, `PrivateTmp=yes`).
 6. Keep the Telegram group private; whitelist only your id.
 7. Back up `airdrop.db` and your encrypted seed yourself. There is no built-in backup.
-8. Treat dry-run and emergency-stop as non-persistent: re-apply after any restart.
+8. Dry-run and the emergency stop survive restarts. Set `DRY_RUN_MODE=true` for the first boot of a new deployment so nothing is broadcast until you have checked it, then switch dry-run off in the dashboard.
 
 ## Before mainnet (not supported today)
 Tighter autonomy rate limits, stricter agreement gate, human approval as default, separate key-encryption secret, pin dependencies, broader tests and CI.

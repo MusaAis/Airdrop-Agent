@@ -26,6 +26,7 @@ Instead:
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from backend.reports.gas_native import gas_native_totals, format_gas_native
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -61,7 +62,9 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
     recent_total = len(recent_txs)
     recent_failed = sum(1 for t in recent_txs if t.status == "failed")
     recent_confirmed = sum(1 for t in recent_txs if t.status == "confirmed")
-    recent_gas_usd = sum(t.gas_cost_usd or 0 for t in recent_txs if t.status == "confirmed")
+    # Gas is reported in each chain's own token (USD is meaningless on testnets and empty
+    # whenever the price lookup fails); totals are per token, never summed across tokens.
+    recent_gas = await gas_native_totals(db, since=since)
     recent_failure_rate = (recent_failed / recent_total) if recent_total else 0.0
 
     # 7-day baseline (excludes the most recent window itself)
@@ -74,9 +77,8 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
     baseline_days = 7
     baseline_total = len(baseline_txs)
     baseline_failed = sum(1 for t in baseline_txs if t.status == "failed")
-    baseline_gas_usd = sum(t.gas_cost_usd or 0 for t in baseline_txs if t.status == "confirmed")
+    baseline_gas = await gas_native_totals(db, since=baseline_since, until=since)
     baseline_failure_rate = (baseline_failed / baseline_total) if baseline_total else 0.0
-    baseline_avg_daily_gas = (baseline_gas_usd / baseline_days) if baseline_days else 0.0
 
     # Failure reasons (top clusters in the recent window)
     reason_counts: dict = {}
@@ -118,7 +120,8 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
         "tx_confirmed": recent_confirmed,
         "tx_failed": recent_failed,
         "failure_rate_pct": round(recent_failure_rate * 100, 1),
-        "gas_spent_usd": round(recent_gas_usd, 2),
+        "gas_spent": format_gas_native(recent_gas),
+        "gas_spent_native": {k: round(v, 8) for k, v in recent_gas.items()},
         "top_failure_reasons": [{"reason": r, "count": c} for r, c in top_failures],
         "daily_target_shortfalls": shortfalls[:20],
         "shortfall_count": len(shortfalls),
@@ -136,13 +139,14 @@ async def _gather_facts(db: AsyncSession, hours: int = 24) -> dict:
                 f"Failure rate is up {delta*100:.1f} percentage points vs the "
                 f"7-day baseline ({recent_failure_rate*100:.1f}% vs {baseline_failure_rate*100:.1f}%)."
             )
-    if baseline_avg_daily_gas > 0:
-        window_days = max(hours / 24, 0.01)
-        recent_daily_gas = recent_gas_usd / window_days
-        if recent_daily_gas >= baseline_avg_daily_gas * GAS_COST_FLAG_MULTIPLIER:
+    window_days = max(hours / 24, 0.01)
+    for sym, base_total in baseline_gas.items():
+        base_daily = base_total / baseline_days
+        recent_daily = recent_gas.get(sym, 0.0) / window_days
+        if base_daily > 0 and recent_daily >= base_daily * GAS_COST_FLAG_MULTIPLIER:
             flags.append(
-                f"Gas spend is running at ~${recent_daily_gas:.2f}/day, "
-                f"{recent_daily_gas / baseline_avg_daily_gas:.1f}x the 7-day average of ${baseline_avg_daily_gas:.2f}/day."
+                f"{sym} gas spend is running at ~{recent_daily:.6g} {sym}/day, "
+                f"{recent_daily / base_daily:.1f}x the 7-day average of {base_daily:.6g} {sym}/day."
             )
     facts["trend_flags"] = flags
     return facts
@@ -235,7 +239,7 @@ def format_plain_fallback(facts: dict) -> str:
     lines = [
         f"Txs: {facts['tx_total']} total, {facts['tx_confirmed']} confirmed, "
         f"{facts['tx_failed']} failed ({facts['failure_rate_pct']}% failure rate).",
-        f"Gas spent: ${facts['gas_spent_usd']}.",
+        f"Gas spent: {facts['gas_spent']}.",
     ]
     if facts["shortfall_count"]:
         lines.append(f"{facts['shortfall_count']} wallet/task targets behind today.")

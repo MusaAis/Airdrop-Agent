@@ -65,14 +65,14 @@ async def handle_agent_kill(user_id: int, db):
 
 async def handle_agent_dryrun_on(user_id: int, db):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    from backend.core.kill_switch import set_dry_run
-    set_dry_run(True)
-    return "🟡 Dry-run mode ON — agent will simulate but not submit transactions."
+    from backend.core.kill_switch import set_dry_run_persistent
+    await set_dry_run_persistent(db, True, by=f"telegram {user_id}")
+    return "🟡 Dry-run mode ON — agent will simulate but not submit transactions (saved; survives restarts)."
 
 async def handle_agent_dryrun_off(user_id: int, db):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"
-    from backend.core.kill_switch import set_dry_run
-    set_dry_run(False)
+    from backend.core.kill_switch import set_dry_run_persistent
+    await set_dry_run_persistent(db, False, by=f"telegram {user_id}")
     return "🟢 Dry-run mode OFF — agent will submit live transactions."
 
 async def handle_agent_restart(user_id: int, db):

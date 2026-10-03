@@ -48,13 +48,10 @@ async def handle_gas_cost(user_id, args, db, confirmation=None):
     from backend.models import Transaction
     from sqlalchemy import select, func
     from datetime import datetime, timedelta, timezone
-    since = datetime.now(timezone.utc) - timedelta(hours=hours)
-    total = (await db.execute(
-        select(func.sum(Transaction.gas_cost_usd)).where(
-            Transaction.wallet_id==wid, Transaction.created_at>=since, Transaction.status=="confirmed"
-        )
-    )).scalar() or 0
-    return f"Total gas spent by wallet {wid} in last {hours}h: ${total:.2f}"
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
+    from backend.reports.gas_native import gas_native_totals, format_gas_native
+    total = await gas_native_totals(db, since=since, wallet_id=wid)
+    return f"Total gas spent by wallet {wid} in last {hours}h: {format_gas_native(total)}"
 
 async def handle_gas_budget(user_id, args, db, confirmation=None):
     if not is_whitelisted(user_id): return "⛔ Unauthorized"

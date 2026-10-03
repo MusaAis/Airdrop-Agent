@@ -33,7 +33,7 @@ from backend.wallet.hd_generator import get_master_seed
 from backend.chains.manager import get_chain
 from backend.core.nonce_manager import release_nonce, sync_nonce_from_chain
 from backend.core.kill_switch import (
-    is_emergency_stop, is_dry_run, set_dry_run, deactivate_kill_switch, is_ai_autonomy_paused,
+    is_emergency_stop, is_dry_run, set_dry_run_persistent, deactivate_kill_switch, is_ai_autonomy_paused,
 )
 
 router = APIRouter(prefix="/ops", tags=["ops"])
@@ -368,11 +368,12 @@ async def system_state(_user: dict = Depends(verify_token)):
 
 
 @router.post("/system/dry-run")
-async def system_dry_run(data: DryRunRequest, _user: dict = Depends(verify_token)):
+async def system_dry_run(data: DryRunRequest, _user: dict = Depends(verify_token),
+                         db: AsyncSession = Depends(get_db)):
     """Global dry-run toggle (replaces the old per-task dry-run command).
-    In-memory, like the emergency stop: resets to OFF on restart (kill_switch does
-    not read the DRY_RUN_MODE env value — see PLAN 'Known, not built')."""
-    set_dry_run(data.enabled)
+    Persisted: it survives restarts. DRY_RUN_MODE=true in the environment additionally forces
+    it ON at every boot (it can never force it off)."""
+    await set_dry_run_persistent(db, data.enabled, by="dashboard")
     return _system_state()
 
 

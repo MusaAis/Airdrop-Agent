@@ -1,6 +1,6 @@
 import random
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from backend.models import WalletSettings
 
@@ -60,6 +60,37 @@ def is_in_active_hours(settings: Optional[WalletSettings]) -> bool:
     else:
         # Wraps midnight e.g. 22→06
         return now_hour >= start or now_hour < end
+
+
+def active_window_start(settings: Optional[WalletSettings], now: datetime) -> Optional[datetime]:
+    """Start (UTC) of the active window that contains `now` (for a window that wraps
+    midnight, 22->06, and it is 03:00, that is yesterday 22:00). None = no window configured."""
+    if not settings or settings.active_hour_start is None or settings.active_hour_end is None:
+        return None
+    start, end = settings.active_hour_start, settings.active_hour_end
+    day_start = now.replace(hour=start, minute=0, second=0, microsecond=0)
+    if start > end and now.hour < end:
+        day_start -= timedelta(days=1)
+    return day_start
+
+
+def day_start_offset_minutes(settings: Optional[WalletSettings], wallet_id: int, window_start: datetime) -> int:
+    """Per-wallet, per-day stagger after the window opens, in [0, start_offset_max_mins].
+    Deterministic (seeded by wallet + date) so it is stable across the 30 s queue cycles and
+    restarts without storing anything, yet different for every wallet and every day."""
+    max_mins = 45
+    if settings is not None and settings.start_offset_max_mins is not None:
+        max_mins = max(0, int(settings.start_offset_max_mins))
+    return random.Random(f"{wallet_id}:{window_start.date().isoformat()}").randint(0, max_mins)
+
+
+def has_started_for_the_day(settings: Optional[WalletSettings], wallet_id: int, now: datetime) -> bool:
+    """False while the wallet is still inside its personal start offset after its window opened,
+    so wallets that share an active window do not all fire in the first queue cycle."""
+    ws = active_window_start(settings, now)
+    if ws is None:
+        return True
+    return now >= ws + timedelta(minutes=day_start_offset_minutes(settings, wallet_id, ws))
 
 
 def should_flip_direction(bidirectional: bool) -> bool:

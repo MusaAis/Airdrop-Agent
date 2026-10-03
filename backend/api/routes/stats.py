@@ -13,6 +13,8 @@ from backend.database import get_db
 from backend.security.auth import verify_token
 from backend.models import Project, Wallet, TaskConfig, Transaction, Alert
 
+from backend.reports.gas_native import gas_native_totals, format_gas_native
+
 router = APIRouter(prefix="/stats", tags=["stats"])
 
 
@@ -31,9 +33,13 @@ async def _tx_stats(db: AsyncSession, since=None) -> dict:
         stmt = stmt.where(Transaction.created_at >= since)
     total, ok, failed, gas = (await db.execute(stmt)).one()
     ok, failed = int(ok or 0), int(failed or 0)
+    native = await gas_native_totals(db, since=since)
     return {
         "total": int(total or 0), "confirmed": ok, "failed": failed,
         "gas_usd": round(float(gas or 0), 2),
+        # factual per-token gas (USD above is an estimate and meaningless on testnets)
+        "gas_native": {k: round(v, 8) for k, v in native.items()},
+        "gas_native_text": format_gas_native(native),
         "success_rate": round(ok / (ok + failed) * 100, 1) if (ok + failed) else None,
     }
 
@@ -83,6 +89,17 @@ async def overview(_user: dict = Depends(verify_token), db: AsyncSession = Depen
             .group_by(TaskConfig.project_id)
         )).all()
     }
+    native_rows = (await db.execute(
+        select(TaskConfig.project_id, Transaction.gas_token, func.sum(Transaction.gas_cost_native))
+        .select_from(Transaction)
+        .join(TaskConfig, Transaction.task_config_id == TaskConfig.id)
+        .where(Transaction.gas_cost_native.is_not(None))
+        .group_by(TaskConfig.project_id, Transaction.gas_token)
+    )).all()
+    native_by_project: dict = {}
+    for pid, sym, total in native_rows:
+        if total:
+            native_by_project.setdefault(pid, {})[sym or "?"] = float(total)
     per_project = []
     for p in projects:
         t_total, t_enabled = task_rows.get(p.id, (0, 0))
@@ -96,6 +113,8 @@ async def overview(_user: dict = Depends(verify_token), db: AsyncSession = Depen
             "tx_confirmed": int(r[2]) if r else 0,
             "tx_failed": int(r[3]) if r else 0,
             "gas_usd": round(float(r[4] or 0), 2) if r else 0.0,
+            "gas_native": {k: round(v, 8) for k, v in native_by_project.get(p.id, {}).items()},
+            "gas_native_text": format_gas_native(native_by_project.get(p.id, {})),
             "wallets": int(r[5]) if r else 0,
             "active_days": int(r[6]) if r else 0,
             "last_tx_at": r[7].isoformat() if r and r[7] else None,

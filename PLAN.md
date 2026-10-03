@@ -210,7 +210,44 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
 - `backend/api/routes/claims.py` new; `backend/main.py`, `backend/api/routes/wallets.py` small edits
 - `frontend/`: `src/index.css`, `App.jsx`, `vite.config.js`, `components/{ui,nav,Sidebar,BottomNav,Topbar,Toast,Confirm,LiveLog,WalletManage,StatsOverview,SystemPanel}`, `hooks/{useApi,useLiveFeed}.js`, `lib/format.js`, pages `{Dashboard,Wallets,Balances,Projects,Tasks,Proxies,Logs,AiLog,Claims,Sybil,Snapshot,Notifications,Login,Chains,Faucets,ProjectDetail}`
 
-## next up: phase 10 (documentation)
+## 0.10 Phase 10 completion notes
+Phase 10 (documentation) is done: `README.md`, `ROADMAP.md` and `docs/` (`ARCHITECTURE.md`, `HOW-IT-WORKS.md`, `SECURITY.md`, `DEPLOYMENT.md`, `REFERENCE.md`). They were written from the code, not from this plan, and `docs/SECURITY.md` lists every gap that was open at the time. They are kept current with each change below; if a doc and the code disagree, the code wins and the doc is a bug.
+
+## 0.11 Phase 11 completion notes: hardening and reliability pass
+Not in the original phase list: it works through `airdrop-agent-review.md` from C7 onward and then the first three ROADMAP items. Every item below has automated tests (`backend/test_security_fixes.py` 66 checks, `test_killswitch_persist.py` 22, `test_scheduling.py` 35, `test_native_gas.py` 27, plus `test_c2c3c4.py`). Run them from the repo root with `python3 -m backend.<name>`; none needs network, a chain or Telegram.
+
+**Auth and secrets (review C7, C8, H1, H6, H7, H8, H9)**
+- `security/auth.py`: every JWT now carries a `type` (`access`, `refresh`; the device-trust cookie keeps its own). `decode_token(token, expected_type)` requires the type, so a refresh or device-trust token is no longer a Bearer token and an access token can no longer be "refreshed". Tokens issued before this change have no `type` and are rejected: everyone logs in once more.
+- `api/routes/auth.py`: `/auth/refresh` takes `{"refresh_token"}` in the body (not the URL) and checks the user still exists. `/auth/totp/setup` needs the account password (plus a current code if 2FA is on); the new secret stays in memory until `/auth/totp/verify-setup` succeeds, so a failed or abandoned replacement never disables 2FA; `/auth/totp/disable` needs password + code; failures on the three TOTP routes are limited to 5 per 15 min per user. Unknown usernames cost the same bcrypt work as wrong passwords.
+- `security/startup_checks.py` (new) + `main.py`: the server refuses to start if `SECRET_KEY` is empty/placeholder/< 32 chars or `MASTER_PASSWORD` is empty/placeholder/< 8 chars (8-11 chars only warns, because that value also encrypts stored keys and cannot be rotated casually). `ALLOW_INSECURE_SECRETS=true` is a loud local-development escape hatch.
+- Removed: `POST /agent/wallets/{id}/private-key` (key export) and the unused `/webhooks` router (SSRF).
+- `wallet/manager.py`: imported keys accept `0x`/whitespace/uppercase (`normalize_private_key`); bad input is a 400 that never echoes the key, a duplicate address is a 409.
+- Chains have a `coingecko_id` (API + Chains page). `wallet/balance.py:chain_coingecko_id` uses it, else a built-in symbol map (`ETH` -> `ethereum`); ERC20 balance calls use checksummed addresses.
+- `requirements.txt`: `bcrypt>=4.0.1,<5` (passlib 1.7.4 fails to hash anything with bcrypt 5.x).
+
+**Fees (review H2)**
+- `tasks/base.py:_record_fee` writes `gas_used`, `gas_token`, `gas_cost_native` (fee actually paid, in gas-token units) and `gas_cost_usd` (native x CoinGecko price, empty if the lookup fails) from the receipt, for confirmed AND reverted transactions. Failed transactions store `error_message`. `Log.gas_cost_usd` is filled for successes.
+
+**Schema (SQLite)**
+- `database.py:_sqlite_add_missing_columns`: `init_db()` adds any model column missing from an existing table (nullable, or with a scalar default). New this pass: `chains.coingecko_id`, `transactions.gas_cost_native`, `wallets.next_available_at`, and the new table `kill_switch_state`. Renames/drops/other NOT NULL columns still need manual SQL; Alembic is still not wired.
+
+**Persisted emergency stop and dry-run (ROADMAP 1)**
+- `core/kill_switch.py`: new single-row table `kill_switch_state`. `activate_kill_switch`/`deactivate_kill_switch` write it in the same transaction as `agent_status`; the dashboard toggle, `POST /ops/system/dry-run` and the Telegram natural-language dry-run actions (`agent.dryrun`, `agent.dryrun_off`) go through `set_dry_run_persistent`. `load_kill_switch_state()` runs at startup after `init_db()` and before the scheduler and agent loop: the emergency stop is restored as saved; dry-run is ON if saved ON **or** `DRY_RUN_MODE=true` (the env can force it on at boot, never off). If the state cannot be read it fails safe: emergency stop + dry-run. `agent_pause_all` uses the emergency stop, so it now persists too (`/agent_resume_all` or the dashboard "Clear emergency stop" ends it).
+
+**Human-like pacing (ROADMAP 2 / review H4)**
+- New `core/scheduling.py`; `core/queue_manager.py` and `core/worker_pool.py` use it. After every real attempt `TaskSchedule.next_run_at` is set (success: `frequency_mins` x U(0.8, 1.4); failure: ~10 min x U(0.8, 1.5); skip, gas-spike or memory deferral: U(3, 8) min) and `Wallet.next_available_at` is set to now + the wallet's `sleep_min_mins..sleep_max_mins`. Candidates must be past both, and past their personal start offset after the active window opens (`behavior_randomizer.has_started_for_the_day`: deterministic per wallet and day, `[0, start_offset_max_mins]`). A wallet gets one task per fill cycle, also across projects. Dry-run ("simulated") results never touch the schedule.
+- `last_selected_at` is now written, so least-recently-used rotation works (it previously compared naive DB values with an aware `datetime.min`, a latent `TypeError`). The old `asyncio.sleep(min(delay, 30))` after enqueue (which only blocked the fill loop) is gone.
+- Behaviour change to expect: a wallet can no longer burn its whole daily target back to back. With `frequency_mins=120` and a 12 h active window a wallet manages roughly 5-6 successes a day, so set `frequency_mins` and `daily_tx_min/max` consistently or targets will show as unmet.
+
+**Gas in reports (ROADMAP 3)**
+- New `reports/gas_native.py`. The dashboard overview (24h/7d/all-time and per project), daily/weekly/monthly reports, Telegram `/report_gas`, `/report_weekly`, gas cost per wallet, wallet compare, the daily-summary alert and the AI analyst now report gas per token (`0.0035 ETH · 0.0004 BNB`), never summed across tokens. Gas spent includes reverted transactions (they burn gas) and ignores rows recorded before fee tracking. API payloads keep their `gas_usd` fields and add `gas_native` / `gas_native_text`. The analyst's fact pack no longer contains a USD gas figure for the model to narrate, and its gas-spike flag now works per token.
+
+**Not changed on purpose:** the IP-whitelist middleware stays disabled (network exposure is handled at the host/tunnel level; `ALLOWED_IPS` has no effect).
+
+**Migration:** none by hand on SQLite (columns and the new table are added at start-up). Run `pip install -r backend/requirements.txt`. A fresh database needs nothing.
+
+## next up
+See `ROADMAP.md` ("Next"). Phases 1-11 are built.
 
 ## Known, not built
 **every times you discovered somethings usefull and you didn't build/fix it, add it here and the dev team will lock at it and build it, don't forgot to add recommendations if there is any here too:**
@@ -221,8 +258,8 @@ Phase 9 (website redesign + polish, phone and desktop) is done.
 **added in Phase 7, with recommendations**
 - ~~Claims page is dead~~ (Phase 9: read-only `/claims/scan` built). Still open: manual claim execution with confirm + dry-run. **Claims page is dead (old note)**: `Claims.jsx` calls `/claims/eligible`, `/claims/pending`, `/claims/trigger`, `/claims/threshold`; no router serves them, and Telegram `/claim_trigger` only prints instructions. Nothing can execute a claim today. Recommend: Phase 9 builds read-only `/claims/*` on top of `claims/manager.scan_claimable_airdrops`, then a deliberate manual claim execution with a confirm dialog and dry-run support. Remove the stale auto-claim threshold box.
 - **Project blacklist is unenforced**: `CompletedProjectsBlacklist` was only read by the removed discovery code. Recommend: either check it in project creation (route + Telegram wizard) or drop the table and command.
-- **`DRY_RUN_MODE` env is ignored**: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
-- **Emergency stop is in memory too** and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
+- ~~**`DRY_RUN_MODE` env is ignored**~~ (Phase 11: read at startup, forces dry-run on; the toggle is persisted). Old note: `kill_switch` starts with dry-run OFF regardless of config, and the dashboard toggle is in memory, so a restart goes live. Recommend: read `DRY_RUN_MODE` at startup and persist the toggle like the AI-autonomy flag.
+- ~~**Emergency stop is in memory too**~~ (Phase 11: persisted in `kill_switch_state`; the dashboard already has Agent start/stop). Old note: and resets on restart; the agent loop is stopped by it but must be started again by hand. Recommend: persist it, and add an Agent start/stop control to the dashboard.
 - **Faucets**: ~~`method: GET` faucets sent as POST~~ (fixed in the verification pass); only `{address}` can be templated. `faucet/handlers/http_post.py` is unused and passes `proxies=`, which httpx >= 0.28 removed (delete it or use `client_proxy_kwargs`).
 - **Proxies cover faucet claims only.** RPC calls and the transactions themselves still come from the server IP. Recommend: if Sybil-hardening matters, route RPC per wallet through its proxy (needs a per-wallet web3 provider). `Wallet.proxy_id` is an unused duplicate of `Proxy.wallet_id`.
 - **Sessions**: a reload no longer logs you out (Phase 9) but the refresh-token endpoint is still never used by the frontend (30 min expiry -> re-login). Recommend: use the refresh token (httpOnly cookie) so a reload or 30-minute expiry does not force a re-login, still keeping the access token out of localStorage.
@@ -238,7 +275,7 @@ If a topic is deleted in Telegram, sends fall back to DMs until /group_setup res
 
 **added in the Phase 7 verification pass / Phase 9**
 - **Claim EXECUTION is still not implemented anywhere** (Telegram `/claim_trigger` only prints instructions). Needs a TaskConfig-less transaction path (`Transaction.task_config_id` is NOT NULL). Recommend: manual claim with a confirm dialog + dry-run, never automatic.
-- **`Transaction.gas_cost_usd` is never written**, so every "Gas $" figure is 0. Needs gas_used x price at confirm time; on testnet the USD value is meaningless anyway, so consider showing native gas instead.
+- ~~**`Transaction.gas_cost_usd` is never written**~~ (Phase 11: fees are recorded per transaction and reports show native gas per token). Old note: so every "Gas $" figure is 0. Needs gas_used x price at confirm time; on testnet the USD value is meaningless anyway, so consider showing native gas instead.
 - **Gas multiplier is applied twice**: `persona.gas_multiplier` in each task's build step AND `WalletSettings.gas_multiplier` in `BaseTask.execute`. Pick `WalletSettings` as the single source.
 - **Dry-run pauses automatic queue filling** (`agent.periodic_fill`); the Telegram text "will simulate" is inaccurate.
 - **Telegram maintenance window** (`system_maintenance`) was never enforced by the scheduler/queue.
@@ -249,6 +286,14 @@ If a topic is deleted in Telegram, sends fall back to DMs until /group_setup res
 - **Website seed unlock** rejected a correct password: it required a perfect BIP39 checksum, stricter than Telegram's unlock and than derivation itself. It now proves the password by re-deriving an existing HD wallet's address (falls back to a word-count sanity check when no HD wallet exists).
 - **`derive_hd_wallet` had dead code** (`HDWalletMnemonic("english")`) that raises on eth-account >= 0.13; removed, so a dependency upgrade cannot break wallet derivation. Consider pinning `eth-account` in `requirements.txt`.
 - **Live feed URL**: if `VITE_BACKEND_WS_URL` is not set it is derived from `VITE_API_BASE_URL` (https -> wss) instead of assuming the Vercel origin. Error toasts now include the HTTP status, and the Dashboard Overview card shows the real reason it could not load.
+
+**added in Phase 11**
+- **Pacing edge cases:** editing a task's `frequency_mins` does not re-time an existing `next_run_at` (the old time must elapse first). Manual triggers (`/ops` task trigger, run-all, Telegram `task_trigger`) are not paced and do not update the schedule. Persona re-roll and wallet recover do not clear `next_available_at`. `TaskSchedule` rows are never pruned when a task or wallet is deleted. Recommend: reset the schedule on those edits and add the "why am I not running?" view (it can now read `next_available_at` / `next_run_at`).
+- **H4 leftovers:** `randomize_amount()` still ignores `WalletSettings.amount_*_override` / `amount_vary_daily`.
+- **Daily targets vs frequency:** a target the pacing cannot reach inside the active window shows as unmet; nothing warns about it. Recommend a warning in the task form when `daily_tx_min x frequency_mins` exceeds the window length.
+- **Gas figures:** `gas_cost_usd` is only an estimate (a testnet token priced at its mainnet value) and is empty when CoinGecko fails; `Log` has no native column; `/reports/*` JSON endpoints other than gas still show raw USD; `projects/eligibility.py` and `tasks/metric_tasks.py` still use `gas_cost_usd` as a volume proxy, so the `volume` criterion is unreliable. Transactions recorded before fee tracking have no fee and read as zero/none recorded.
+- **Kill switch:** `agent_stop` / `POST /agent/stop` (loop stopped, no emergency) is not persisted; the loop auto-starts at boot. Dry-run still pauses automatic queue filling (unchanged).
+- **Auth leftovers:** login lockout still keys on `request.client.host` (the proxy address behind a tunnel); the JWT is still in `localStorage`; refresh tokens cannot be revoked individually (rotate `SECRET_KEY`); 2FA enrolment has no dashboard screen; `MASTER_PASSWORD` is still both login password and key-encryption password (splitting needs a re-encryption migration).
 
 ## any suggestions or recommendations should be here(whethere new features, advices or whats ever it's) and there welcome.
 - **Phase 9 should start from a short design system**: shared `Table`, `Modal`, `Toast`, `ConfirmButton` and `useApi` hook. Today every page re-implements loading, errors and confirm dialogs.
@@ -323,7 +368,7 @@ A self-hosted airdrop farming agent: manages HD/imported wallets across multiple
 - Eligibility %, ROI *(removed)*, daily progress, gas usage, Sybil report, activity log, live server health (RAM/CPU/disk/worker slots), CSV export
 
 ### Auth & security
-- JWT access + refresh tokens, TOTP 2FA with QR enrollment, device-trust cookies (skip 2FA on remembered devices), brute-force lockout (DB-persisted), IP whitelist middleware, encrypted seed/private-key storage
+- JWT access + refresh tokens (typed: a token is accepted only by the endpoint that expects its type), TOTP 2FA with QR enrollment (API-only; password + current code needed to replace/disable), device-trust cookies (skip 2FA on remembered devices), brute-force lockout (DB-persisted), encrypted seed/private-key storage, startup refusal on weak `SECRET_KEY`/`MASTER_PASSWORD`. IP whitelist middleware exists but is intentionally disabled.
 - **(Removed — see §3)** Encrypted nightly DB backup
 
 ### Interfaces
@@ -336,8 +381,8 @@ A self-hosted airdrop farming agent: manages HD/imported wallets across multiple
 - **(Removed — see §3)** New-project-found alerts (discovery is gone)
 
 ### Kill switch
-- Emergency stop: halts new task dispatch and clears the queue; cannot un-broadcast an already-submitted transaction
-- Global dry-run toggle enforced at the actual broadcast point, not just the queue-fill loop
+- Emergency stop: halts new task dispatch and clears the queue; cannot un-broadcast an already-submitted transaction. Persisted across restarts.
+- Global dry-run toggle enforced at the actual broadcast point, not just the queue-fill loop. Persisted across restarts; `DRY_RUN_MODE=true` forces it on at boot.
 
 ---
 
@@ -495,7 +540,8 @@ Ideas worth considering after the current phase, not committed to yet:
 7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
 8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *built*
 9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *built*
-10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
+10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *built*
+11. **Phase 11 - Hardening and reliability pass** (review C7-H9, persisted kill switch/dry-run, human-like pacing, native-gas reports; not in the original list, see §0.11). *built*
 
 This grouping is a suggestion, not a commitment — order can change based on what MusaAis wants tackled first once execution begins.
 

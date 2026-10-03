@@ -86,7 +86,7 @@ export default function SystemPanel() {
           </div>
           <p className="hint faint">
             Dry-run: tasks you trigger manually are simulated and nothing is broadcast, and automatic queue filling is paused while it is on.
-            It is kept in memory and resets to OFF on restart.
+            The setting is saved and survives restarts (DRY_RUN_MODE=true in .env also forces it on at every boot). The emergency stop is saved the same way and stays active after a restart until you clear it.
           </p>
         </div>
       )}

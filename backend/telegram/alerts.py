@@ -79,11 +79,10 @@ async def send_daily_summary():
             targets_met = sum(1 for p in progress_rows if p.completed >= p.daily_target)
             targets_total = len(progress_rows)
 
-            # Total gas cost today (USD)
-            gas_cost = (await db.execute(
-                select(func.sum(Log.gas_cost_usd))
-                .where(Log.created_at >= now.replace(hour=0, minute=0, second=0, microsecond=0))
-            )).scalar() or 0.0
+            # Total gas cost today, in each chain's own gas token (factual; USD is meaningless on testnets)
+            from backend.reports.gas_native import gas_native_totals, format_gas_native
+            gas_text = format_gas_native(await gas_native_totals(
+                db, since=now.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)))
 
             # Projects farming
             total_projects = (await db.execute(
@@ -104,7 +103,7 @@ async def send_daily_summary():
                 f"  {targets_met}/{targets_total} wallet-task targets reached",
                 "",
                 f"⛽ *Gas Spent*",
-                f"  ~${gas_cost:.2f} USD today",
+                f"  {gas_text} today",
                 "",
                 f"📁 *Projects*",
                 f"  {total_projects} active protocols farming",
