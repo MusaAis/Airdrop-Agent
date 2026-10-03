@@ -493,7 +493,7 @@ Ideas worth considering after the current phase, not committed to yet:
 5. **Phase 5 — New feature: AI error notification** (§5.4) — shares logic with Phase 6. *built*
 6. **Phase 6 — New feature: AI-managed tasks/wallets** *built*
 7. **Phase 7 — Website build-out** for everything moved off Telegram (§4, §6) & website improvement including redesign, better ui/ux an a lots more. *built*
-8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *not yet*
+8. **Phase 8 - Telegram channel/group - with topic** including daily report, errors, summary of project works(daily, weekly, monthly)(each different topic), ai report(including all it activities(need validation, etc), total wallets active/non-active with total task/tnx completed/faild, and the remaining thats i forgot to mention and you have right to suggest for improvement or not to add something here, your always welcome. *built*
 9. **Phase 9 - Website redesign** Full redesign + remaining polish(both android & desktop mode). *built*
 10. **Phase 10 - Documentations** including README.md, ROADMAP.md, docs, Architecture.md, How-its-works.md, security.md and the rest/a lot more  of the valueble documments. *not yet*
 
