@@ -108,14 +108,14 @@ class WorkerPool:
         # daily summary counts (which read Log) were empty for real runs. Skips are not
         # logged (they are throttled into task_failures); dry-run 'simulated' rows are
         # written by BaseTask itself. Never raises.
-        async def _log(status: str, tx_hash=None, error=None, gas_used=None):
+        async def _log(status: str, tx_hash=None, error=None, gas_used=None, gas_cost_usd=None):
             try:
                 async with async_session() as ldb:
                     ldb.add(Log(
                         wallet_id=wallet.id, chain_id=chain.id, task_config_id=task_config.id,
                         project_id=project.id, task_name=task_config.task_type, tx_hash=tx_hash,
                         status=status, error_message=(error[:500] if error else None),
-                        gas_used=gas_used, is_dry_run=False, created_at=datetime.now(timezone.utc),
+                        gas_used=gas_used, gas_cost_usd=gas_cost_usd, is_dry_run=False, created_at=datetime.now(timezone.utc),
                     ))
                     await ldb.commit()
             except Exception as e:
@@ -207,7 +207,7 @@ class WorkerPool:
                     if project.consecutive_failures > 0:
                         from backend.projects.circuit_breaker import reset_circuit
                         await reset_circuit(db, project)
-                    log_entry = ("success", result.get("tx_hash"), None, (result.get("receipt") or {}).get("gasUsed"))
+                    log_entry = ("success", result.get("tx_hash"), None, (result.get("receipt") or {}).get("gasUsed"), result.get("gas_cost_usd"))
                 elif status == "failed":
                     wallet.failure_count += 1
                     if wallet.failure_count >= 3:

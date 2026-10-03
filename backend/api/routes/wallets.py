@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from backend.security.auth import verify_token
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from backend.database import get_db
 from backend.models import Wallet
 from backend.wallet.manager import (
@@ -157,7 +158,13 @@ async def generate_hd_wallets(data: WalletCreateHD, _user: dict = Depends(verify
 @router.post("/import")
 async def import_wallet(data: WalletImport, _user: dict = Depends(verify_token), db: AsyncSession = Depends(get_db)):
     from backend.config import MASTER_PASSWORD
-    wallet = await import_private_key(db, data.private_key, MASTER_PASSWORD, data.name, data.tags)
+    try:
+        wallet = await import_private_key(db, data.private_key, MASTER_PASSWORD, data.name, data.tags)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail="A wallet with this address already exists")
     return {"address": wallet.address, "id": wallet.id}
 
 @router.put("/{wallet_id}/status")

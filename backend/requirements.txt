@@ -7,6 +7,7 @@ fastapi>=0.110
 httpx[socks]>=0.25
 mnemonic>=0.20
 passlib[bcrypt]>=1.7
+bcrypt>=4.0.1,<5   # passlib 1.7.4 breaks on bcrypt 5.x (ValueError on every hash)
 psutil>=5.9
 pyotp>=2.9
 python-dotenv>=1.0

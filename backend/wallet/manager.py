@@ -33,8 +33,25 @@ async def create_hd_wallets(db: AsyncSession, count: int, start_index: int = Non
     return db_wallets
 
 # Keep the rest of the file unchanged
+def normalize_private_key(raw: str) -> str:
+    """Accept '0x'-prefixed or bare hex, tolerate surrounding whitespace, and return the
+    64-char lowercase hex string. Raises ValueError with a user-readable message otherwise
+    (never echoes the key itself)."""
+    key = (raw or "").strip()
+    if key[:2] in ("0x", "0X"):
+        key = key[2:]
+    if len(key) != 64:
+        raise ValueError("Private key must be 64 hex characters (a leading 0x is fine)")
+    try:
+        int(key, 16)
+    except ValueError:
+        raise ValueError("Private key must contain only hex characters (0-9, a-f)")
+    return key.lower()
+
+
 async def import_private_key(db: AsyncSession, private_key: str, master_password: str, name: str = None, tags: list = None):
     from eth_keys import keys
+    private_key = normalize_private_key(private_key)
     eth_key = keys.PrivateKey(bytes.fromhex(private_key))
     address = eth_key.public_key.to_checksum_address()
     encrypted = encrypt_private_key(private_key, master_password)

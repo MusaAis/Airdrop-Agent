@@ -29,6 +29,8 @@ class Chain(Base):
     gas_token_is_native: Mapped[bool] = mapped_column(Boolean, nullable=False)
     gas_token_contract: Mapped[Optional[str]] = mapped_column(Text)
     gas_token_decimals: Mapped[int] = mapped_column(Integer, nullable=False)
+    # CoinGecko API id of the gas token (e.g. "ethereum"); the ticker ("ETH") is not a valid id.
+    coingecko_id: Mapped[Optional[str]] = mapped_column(Text)
     gas_fee_model: Mapped[str] = mapped_column(Text, default="legacy")   # "legacy" or "eip1559"
     min_gas_balance_warning: Mapped[float] = mapped_column(Float, nullable=False)
     min_gas_balance_critical: Mapped[float] = mapped_column(Float, nullable=False)
@@ -298,6 +300,9 @@ class Transaction(Base):
     gas_price: Mapped[Optional[float]] = mapped_column(Float)
     gas_token: Mapped[Optional[str]] = mapped_column(Text)
     gas_cost_usd: Mapped[Optional[float]] = mapped_column(Float)
+    # Fee actually paid, in gas-token units (factual; USD is only an estimate and is
+    # meaningless for testnet tokens).
+    gas_cost_native: Mapped[Optional[float]] = mapped_column(Float)
     block_number: Mapped[Optional[int]] = mapped_column(Integer)
     confirmations: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text)

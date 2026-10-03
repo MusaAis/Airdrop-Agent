@@ -10,7 +10,7 @@ const err = e => e?.response?.data?.detail || 'Request failed.'
 function ChainPanel({ c, onSaved }) {
   const [f, setF] = useState({
     name: c.name, explorer_url: c.explorer_url || '', rpc_urls: (c.rpc_urls || []).join('\n'),
-    gas_token_symbol: c.gas_token_symbol, gas_token_is_native: c.gas_token_is_native,
+    gas_token_symbol: c.gas_token_symbol, coingecko_id: c.coingecko_id || '', gas_token_is_native: c.gas_token_is_native,
     gas_token_contract: c.gas_token_contract || '', gas_token_decimals: c.gas_token_decimals,
     min_gas_balance_warning: c.min_gas_balance_warning, min_gas_balance_critical: c.min_gas_balance_critical,
     rpc_rate_limit_per_sec: c.rpc_rate_limit_per_sec, enabled: c.enabled,
@@ -31,7 +31,7 @@ function ChainPanel({ c, onSaved }) {
     if (!urls.length) return setMsg('At least one RPC URL is required.')
     try {
       await api.put(`/chains/${c.id}`, {
-        ...f, rpc_urls: urls, explorer_url: f.explorer_url || null,
+        ...f, rpc_urls: urls, explorer_url: f.explorer_url || null, coingecko_id: f.coingecko_id.trim() || null,
         gas_token_contract: f.gas_token_is_native ? null : (f.gas_token_contract || null),
         gas_token_decimals: Number(f.gas_token_decimals),
         min_gas_balance_warning: Number(f.min_gas_balance_warning),
@@ -61,6 +61,7 @@ function ChainPanel({ c, onSaved }) {
       <input placeholder="Explorer URL" value={f.explorer_url} onChange={e => set({ explorer_url: e.target.value })} />
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
         <input placeholder="Gas symbol" value={f.gas_token_symbol} onChange={e => set({ gas_token_symbol: e.target.value })} style={{ width: 90 }} />
+        <input title="CoinGecko API id used for USD prices, e.g. ethereum, binancecoin, matic-network. Leave blank to guess from the symbol." placeholder="CoinGecko id (optional)" value={f.coingecko_id} onChange={e => set({ coingecko_id: e.target.value })} style={{ width: 170 }} />
         <label style={{ fontSize: 13, display: 'flex', gap: 6, alignItems: 'center' }}>
           <input type="checkbox" checked={f.gas_token_is_native} onChange={e => set({ gas_token_is_native: e.target.checked })} style={{ width: 'auto' }} /> native
         </label>

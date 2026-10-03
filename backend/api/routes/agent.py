@@ -132,48 +132,11 @@ async def unlock_seed(
     except Exception:
         raise HTTPException(status_code=400, detail="Wrong master password or corrupted seed")
 
-class PrivateKeyRequest(BaseModel):
-    master_password: str
-
-@router.post("/wallets/{wallet_id}/private-key")
-async def get_wallet_private_key(
-    wallet_id: int,
-    req: PrivateKeyRequest,
-    _user: dict = Depends(verify_token)
-):
-    """
-    Derive and return the private key for a wallet, after master password verification.
-
-    Fix: the wallet lookup (`get_wallet`) previously ran using `db` AFTER the
-    `async with async_session() as db:` block that created it had already
-    exited — closing the underlying connection. SQLAlchemy raises on any
-    further use of a closed AsyncSession, so this endpoint 500'd on every
-    single call, even with the correct master password. The wallet lookup is
-    now inside the same `async with` block as the password verification, using
-    the still-open session.
-    """
-    master_password = req.master_password
-    async with async_session() as db:
-        entry = (await db.execute(select(AgentSecret).where(AgentSecret.key == 'master_mnemonic'))).scalar_one_or_none()
-        if not entry:
-            raise HTTPException(status_code=404, detail="No stored seed")
-        try:
-            mnemonic = decrypt_seed(entry.value, master_password)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Wrong master password")
-
-        # Fetch wallet to get HD index — now correctly inside the open session.
-        from backend.wallet.manager import get_wallet as gw
-        wallet = await gw(db, wallet_id)
-        if not wallet or not wallet.is_hd:
-            raise HTTPException(status_code=404, detail="Wallet not found or not HD")
-        if wallet.hd_index is None:
-            raise HTTPException(status_code=400, detail="Wallet has no HD index")
-
-    # Key derivation doesn't need the DB session, so it's fine outside the block.
-    wdata = derive_hd_wallet(wallet.hd_index, mnemonic=mnemonic)
-    logger.warning(f"Private key exported via API for wallet_id={wallet_id} address={wallet.address}")
-    return {"address": wdata["address"], "private_key": wdata["private_key"]}
+# H6: the former POST /agent/wallets/{id}/private-key endpoint was removed. It returned a raw
+# private key to anyone holding a login token plus MASTER_PASSWORD, which is the same value as
+# the login password, so one stolen credential exposed every HD wallet. HD keys can be derived
+# offline from your recovery phrase (path m/44'/60'/0'/0/{hd_index}); nothing in the dashboard
+# or Telegram bot used this route.
 
 from backend.models import Alert as AlertModel
 from sqlalchemy import select as _sel

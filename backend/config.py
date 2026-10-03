@@ -35,6 +35,8 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 DRY_RUN_MODE: bool = os.getenv("DRY_RUN_MODE", "false").lower() == "true"
 
 MASTER_PASSWORD: str = os.getenv("MASTER_PASSWORD", "")
+# Escape hatch for local throwaway development only; startup_checks logs it loudly.
+ALLOW_INSECURE_SECRETS: bool = os.getenv("ALLOW_INSECURE_SECRETS", "false").lower() == "true"
 
 SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", "8002"))

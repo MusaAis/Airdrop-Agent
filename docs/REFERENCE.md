@@ -1,14 +1,14 @@
 # API and Telegram reference
 
-All HTTP routes except those marked public require `Authorization: Bearer <access token>`.
+All HTTP routes except those marked public require `Authorization: Bearer <access token>`. Refresh and device-trust tokens are rejected there.
 
-## REST API (133 endpoints)
+## REST API (130 endpoints)
 | Prefix | Purpose |
 |---|---|
-| `/auth` | `login`, `refresh`, `totp/setup`, `totp/verify-setup`, `totp/disable` |
+| `/auth` | `login` (public), `refresh` (public, JSON body), `totp/setup`, `totp/verify-setup`, `totp/disable` |
 | `/agent` | `health` (public), `status`, `start`, `stop`, `kill`, `workers`, `queue`, `set-seed`, `unlock`, alerts list/resolve/snooze |
 | `/wallets` | list, balances, generate, import, status, settings, gas-wallet toggle |
-| `/chains` | CRUD, test RPC, token registry |
+| `/chains` | CRUD (incl. `coingecko_id`), test RPC, token registry |
 | `/projects` | CRUD (delete = archive), restore, stop, eligibility declare/clear, tasks, per-wallet eligibility, criteria draft/accept |
 | `/faucets` | CRUD, tokens, request, request-all, per-wallet status |
 | `/proxies` | CRUD, assign, activate, test |
@@ -18,11 +18,39 @@ All HTTP routes except those marked public require `Authorization: Bearer <acces
 | `/stats` | `overview` |
 | `/claims` | `scan` (read-only, cached 10 min; `?refresh=true`) |
 | `/ops` | project details/contracts/criteria/trigger-all/reset-circuit, task edit/trigger, wallet tags/recover/nonces/settings/persona re-roll, `transactions`, chain gas status, `system` (dry-run, emergency clear, archive logs, agent start/stop, seed unlock), `claims/*` |
-| `/webhooks` | register/unregister (unused, see Security) |
-| `/ws/logs` | WebSocket, `?token=<jwt>`; events `log`, `status`, `heartbeat` |
+| `/ws/logs` | WebSocket, `?token=<access jwt>`; closes with code 4001 otherwise. Events `log`, `status`, `heartbeat` |
 | `/ws/recent-logs` | history of latest logs |
 
-Interactive docs: `/docs` and `/openapi.json` (currently public; restrict in production).
+Removed: `POST /agent/wallets/{id}/private-key` (key export) and the `/webhooks` router (unused, SSRF risk).
+
+Interactive docs: `/docs` and `/openapi.json` (public; the IP whitelist is intentionally off).
+
+### Auth request shapes
+```
+POST /auth/login          {"username", "password", "totp_code"?}   -> access_token, refresh_token
+POST /auth/refresh        {"refresh_token"}                        -> access_token
+POST /auth/totp/setup     {"password", "totp_code"?}               -> secret, qr_code_base64
+                          (totp_code is required when 2FA is already enabled)
+POST /auth/totp/verify-setup {"totp_code"}                         -> enables 2FA with the pending secret
+POST /auth/totp/disable   {"password", "totp_code"}                -> disables 2FA
+```
+Failures on the three `totp` routes are limited to 5 per 15 minutes per user (then 429).
+
+### Enabling 2FA
+```bash
+TOKEN=...   # access_token from /auth/login
+curl -s -X POST https://api.example.com/auth/totp/setup \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"password": "<MASTER_PASSWORD>"}'
+# scan the QR / enter the secret in your authenticator, then:
+curl -s -X POST https://api.example.com/auth/totp/verify-setup \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"totp_code": "123456"}'
+```
+Complete `verify-setup` within 10 minutes; until then any existing 2FA stays active.
+
+### Wallet import
+`POST /wallets/import {"private_key", "name"?, "tags"?}`: key may be bare or `0x`-prefixed hex (64 chars). 400 for malformed keys, 409 if the address already exists.
 
 ## Telegram commands
 Registered command table (73) plus `start`, `help`, `commands`, `agent_unlock`, `agent_kill`, `report_summary`, and group commands `group_setup`, `group_status`, `report_now [daily|weekly|monthly|ai]`.

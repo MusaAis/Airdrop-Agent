@@ -17,11 +17,12 @@
 8. Apply the wallet's gas-multiplier variance.
 9. **Dry-run gate**: if dry-run is on, release the nonce, write a `simulated` log row and stop. In dry-run, approvals are also not sent.
 10. Sign (HD key derived from the in-memory seed, or imported key decrypted with `MASTER_PASSWORD`), broadcast, record a `pending` transaction, release the nonce, wait for the receipt (stuck handler speeds up, then cancels).
+11. **Fee recording**: from the receipt, `gas_used`, `gas_token`, `gas_cost_native` (fee actually paid, in gas-token units) and `gas_cost_usd` (native x CoinGecko price) are stored on the transaction. This also runs for reverted transactions, which still burn gas. A price-lookup failure leaves only the USD estimate empty. Failed transactions also store an `error_message`.
 
 ### Outcomes and their effects
 | Outcome | Wallet failure count | Project circuit breaker | Notes |
 |---|---|---|---|
-| success | unchanged | reset | daily progress +1, `Log` row |
+| success | unchanged | reset | daily progress +1, `Log` row (with gas cost) |
 | failed | +1 (cooldown at 3) | +1 (trips at 5) | classified, stored in `task_failures` |
 | skipped (gas spike, low gas, paused contract) | unchanged | unchanged | throttled record in `task_failures` |
 | simulated (dry-run) | unchanged | unchanged | |
@@ -61,7 +62,9 @@ Guardrails: max 10 adjustments per target per 24 h; max 5 AI reviews per cycle; 
 - Run `/group_setup` inside a private supergroup with Topics to create: Daily, Weekly, Monthly, Errors, AI activity, Alerts. If a send fails, messages fall back to DMs.
 
 ## 6. Reports
-Daily (08:00 UTC), weekly (Mon 08:10), monthly (1st 08:15) cover wallets, tasks completed/failed/skipped, success rate, gas spent, top projects, top failure causes, open alerts and circuit breakers. Caveat: `Transaction.gas_cost_usd` is never written, so USD gas figures read 0 today.
+Daily (08:00 UTC), weekly (Mon 08:10), monthly (1st 08:15) cover wallets, tasks completed/failed/skipped, success rate, gas spent, top projects, top failure causes, open alerts and circuit breakers.
+
+**Gas figures:** `gas_cost_usd` is written for new transactions (native fee x the chain's CoinGecko price). Transactions recorded before this change have no fee data and still read 0. On testnets the USD figure is **not meaningful** (it prices a testnet token at its mainnet value); `gas_cost_native` is the factual number, but the reports still aggregate the USD column.
 
 ## 7. Eligibility
 Per-wallet progress comes from criteria (tx count, volume, time, governance, token-hold, social). Two implementations exist (`reports/eligibility.py` and `projects/eligibility.py`) and they can disagree; volume uses `gas_cost_usd` as a proxy. Treat percentages as indicative. Declaring a project eligible or not-eligible (website only) permanently stops new tasks for it.

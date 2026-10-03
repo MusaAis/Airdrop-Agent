@@ -22,6 +22,7 @@ class ChainCreate(BaseModel):
     gas_token_is_native: bool = True
     gas_token_contract: Optional[str] = None
     gas_token_decimals: int = 18
+    coingecko_id: Optional[str] = None
     min_gas_balance_warning: float = 0.005
     min_gas_balance_critical: float = 0.001
     rpc_rate_limit_per_sec: int = 10
@@ -35,6 +36,7 @@ class ChainUpdate(BaseModel):
     gas_token_is_native: Optional[bool] = None
     gas_token_contract: Optional[str] = None
     gas_token_decimals: Optional[int] = None
+    coingecko_id: Optional[str] = None
     min_gas_balance_warning: Optional[float] = None
     min_gas_balance_critical: Optional[float] = None
     rpc_rate_limit_per_sec: Optional[int] = None

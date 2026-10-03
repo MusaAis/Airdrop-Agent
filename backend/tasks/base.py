@@ -8,7 +8,7 @@ from web3 import AsyncWeb3
 from backend.models import Chain, Wallet, TaskConfig, Project, Transaction, TokenApproval
 from backend.database import async_session
 from backend.chains.rpc_pool import get_web3
-from backend.wallet.balance import get_gas_token_balance, fee_to_gas_token
+from backend.wallet.balance import get_gas_token_balance, fee_to_gas_token, chain_coingecko_id
 from backend.core.nonce_manager import lock_nonce, release_nonce
 from backend.chains.price_oracle import get_usd_price
 from backend.chains.gas import get_current_gas_price, is_gas_spike
@@ -212,18 +212,53 @@ class BaseTask:
                 tx_record.status = "confirmed"
                 tx_record.confirmed_at = datetime.now(timezone.utc)
                 tx_record.block_number = receipt.blockNumber
-                tx_record.gas_used = receipt.gasUsed
+                await self._record_fee(tx_record, receipt)
                 await self.db.commit()
                 logger.info(f"TX confirmed: {tx_hash.hex()}")
-                return {"status": "success", "tx_hash": tx_hash.hex(), "receipt": dict(receipt)}
+                return {"status": "success", "tx_hash": tx_hash.hex(), "receipt": dict(receipt),
+                        "gas_cost_usd": tx_record.gas_cost_usd}
             else:
                 tx_record.status = "failed"
+                if receipt:
+                    tx_record.block_number = receipt.blockNumber
+                    await self._record_fee(tx_record, receipt)
+                    tx_record.error_message = "transaction reverted on-chain"
+                else:
+                    tx_record.error_message = "no receipt before timeout (stuck or replaced)"
                 await self.db.commit()
                 return {"status": "failed", "reason": "tx_failed_onchain"}
         except Exception as e:
             await release_nonce(self.db, self.wallet.id, self.chain.id, increment=False)
             logger.error(f"TX submission error: {e}")
+            rec = locals().get("tx_record")
+            if rec is not None:
+                try:
+                    rec.status = "failed"
+                    rec.error_message = str(e)[:500]
+                    await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
             return {"status": "failed", "reason": str(e)}
+
+    async def _record_fee(self, tx_record, receipt) -> None:
+        """Fill gas_used / gas_token / gas_cost_native / gas_cost_usd from a receipt. Reverted
+        transactions still burn gas, so this runs for failures too. Never raises: a price
+        lookup failure only leaves the USD estimate empty."""
+        try:
+            gas_used = int(receipt.gasUsed)
+            price = receipt.get("effectiveGasPrice") or tx_record.gas_price or 0
+            native = fee_to_gas_token(self.chain, Decimal(gas_used) * Decimal(price))
+            tx_record.gas_used = gas_used
+            tx_record.gas_token = self.chain.gas_token_symbol
+            tx_record.gas_cost_native = float(native)
+            try:
+                usd_price = await asyncio.wait_for(get_usd_price(chain_coingecko_id(self.chain)), 8)
+                if usd_price is not None:
+                    tx_record.gas_cost_usd = float(native) * usd_price
+            except Exception:
+                pass  # USD is only an estimate (and meaningless on testnets)
+        except Exception as e:
+            logger.warning(f"Could not record fee for {tx_record.tx_hash}: {e}")
 
     async def estimate_gas(self) -> Decimal:
         """Default gas estimation (can be overridden by subclasses)."""

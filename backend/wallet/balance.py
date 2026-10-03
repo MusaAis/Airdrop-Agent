@@ -8,6 +8,23 @@ import logging
 
 logger = logging.getLogger("airdrop.balance")
 
+# CoinGecko needs its own id ("ethereum"), not the ticker ("eth"). Chain.coingecko_id wins;
+# this table only covers common gas tokens so existing chains work without editing.
+GAS_TOKEN_COINGECKO_IDS = {
+    "ETH": "ethereum", "BNB": "binancecoin", "MATIC": "matic-network",
+    "POL": "polygon-ecosystem-token", "AVAX": "avalanche-2", "FTM": "fantom",
+    "CELO": "celo", "MNT": "mantle",
+}
+
+
+def chain_coingecko_id(chain: Chain) -> str:
+    explicit = (getattr(chain, "coingecko_id", None) or "").strip()
+    if explicit:
+        return explicit.lower()
+    sym = (chain.gas_token_symbol or "").strip()
+    return GAS_TOKEN_COINGECKO_IDS.get(sym.upper(), sym.lower())
+
+
 def fee_to_gas_token(chain: Chain, fee_wei) -> Decimal:
     """Convert a fee estimate (gas units x gas price, i.e. the chain's smallest unit)
     into the same human units get_gas_token_balance() returns, so the two can be
@@ -22,6 +39,10 @@ async def check_native_balance(w3: AsyncWeb3, address: str) -> Decimal:
     return Decimal(balance_wei) / Decimal(10**18)
 
 async def check_erc20_balance_raw(w3: AsyncWeb3, contract_address: str, address: str) -> int:
+    # web3 v7 rejects non-checksummed addresses; DB values are stored as typed by the user.
+    from web3 import Web3
+    contract_address = Web3.to_checksum_address(contract_address)
+    address = Web3.to_checksum_address(address)
     abi = [{"constant":True,"inputs":[{"name":"_owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"balance","type":"uint256"}],"type":"function"}]
     contract = w3.eth.contract(address=contract_address, abi=abi)
     return await contract.functions.balanceOf(address).call()
@@ -64,7 +85,7 @@ async def refresh_wallet_balances(db, wallet, chains: list) -> list:
         # 1. Gas token (native or ERC20)
         try:
             gas_balance = await get_gas_token_balance(chain, wallet.address)
-            gas_coingecko_id = chain.gas_token_symbol.lower()
+            gas_coingecko_id = chain_coingecko_id(chain)
             usd = None
             try:
                 price = await get_usd_price(gas_coingecko_id)

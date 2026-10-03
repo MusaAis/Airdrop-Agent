@@ -3,31 +3,34 @@
 History lives in `PLAN.md` (phases 1-10). This file is the forward view.
 
 ## Done
-Phases 1-9: removals and trim, project wizard, NL + AI analyst, failure analysis, bounded AI autonomy, website build-out, Telegram topics and reports, redesign. Phase 7/9 verification pass fixed gas units, detached-object persistence, nonce sync, dry-run approvals, Telegram confirm flow and agent stop. Phase 10 (documentation) is this doc set.
+Phases 1-9: removals and trim, project wizard, NL + AI analyst, failure analysis, bounded AI autonomy, website build-out, Telegram topics and reports, redesign. Phase 10: documentation (`docs/`).
 
-## Next: stabilise (recommended before new features)
-1. **Auth (C7, C8, H1)**: token types, startup refusal on weak secrets, 2FA re-enrol protection.
-2. **Remove or lock down** private-key export (H6) and webhooks (H7).
-3. **Enable IP whitelist**, bind to localhost, restrict `/docs`.
-4. **Persist emergency stop and dry-run**; read `DRY_RUN_MODE` at startup. Consider auto-unlock of the seed at boot if you accept the trade-off.
-5. **Write gas cost per transaction** (`gas_used x effective price`; show native gas on testnet) so reports and eligibility volume stop reading 0.
-6. Fix import of `0x` keys (H8) and CoinGecko ids (H9, add a `coingecko_id` to `Chain`).
-7. Unify the gas multiplier (persona vs `WalletSettings`).
-8. Wire Alembic (`target_metadata`, first revision) so schema changes stop being manual.
-9. Add tests and CI: gas conversion, nonce lock/sync, agreement scoring, error classification, autonomy bounds, project dispatch.
-10. Pin dependencies; check `signed.rawTransaction` and `tx_hash.hex()` against current `eth-account`/`hexbytes`.
+Verification and hardening passes (see `airdrop-agent-review.md`): gas units, detached-object persistence, nonce sync, dry-run approvals, Telegram confirm flow, agent stop, then typed JWTs (C7), startup secret checks (C8), protected 2FA enrolment (H1), per-transaction fee recording (H2), removal of key export (H6) and the webhook registry (H7), `0x` key import (H8), CoinGecko ids and checksummed ERC20 calls (H9), and automatic SQLite column additions.
+
+## Next
+1. **Persist emergency stop and dry-run**; read `DRY_RUN_MODE` at startup. Consider auto-unlock of the seed at boot if you accept the trade-off.
+2. **Human-like scheduling (H4)**: honour `frequency_mins`, persona sleep times and per-wallet `next_run_at` (`TaskSchedule` is unused); update `last_selected_at`.
+3. **Reports on native gas**: aggregate `gas_cost_native` (factual) instead of, or next to, the testnet-meaningless USD figure; unify the two eligibility implementations.
+4. Unify the gas multiplier (persona vs `WalletSettings`).
+5. Wire Alembic (`target_metadata`, first revision) for renames/drops/Postgres; the automatic column adder only covers additive SQLite changes.
+6. Add tests and CI beyond the two current suites: nonce lock/sync edge cases, agreement scoring, error classification, autonomy bounds, project dispatch.
+7. Pin dependencies; check `signed.rawTransaction` and `tx_hash.hex()` against current `eth-account`/`hexbytes`.
+8. Login limiter keyed on the real client IP behind a proxy; httpOnly refresh cookie with an in-memory access token.
+9. Separate key-encryption secret from the login password (needs a re-encryption migration).
 
 ## Backlog (from PLAN.md and review)
-- Human-like scheduling: honour `frequency_mins`, persona sleep times and per-wallet `next_run_at` (`TaskSchedule` is unused); update `last_selected_at`.
 - Autonomy recovery: gas multiplier decay, priority restore, auto-recover wallets in cooldown.
 - Manual claim execution with confirm + dry-run (never automatic); needs a transaction path without `task_config_id`.
 - Faucet cooldown should count only successful requests and verify arrival.
 - Enforce or drop `completed_projects_blacklist`; enforce the maintenance window.
-- Refresh-token cookie flow; audit log of manual actions; per-wallet "why am I not running?" view.
+- Dashboard screen for 2FA enrolment; audit log of manual actions; per-wallet "why am I not running?" view.
 - Proxies for RPC calls per wallet (today proxies cover faucets only).
 - Task templates; draft-only AI task configs (addresses must appear in the docs and have code on chain; saved disabled).
 - Report schedule and "test each topic" control in Settings; auto-recreate deleted Telegram topics.
 - Cleanup of dead code listed in `airdrop-agent-review.md`.
 
+## Deliberate decisions
+- The IP-whitelist middleware stays disabled; network exposure is handled at the host/tunnel level.
+
 ## Long term
-Multi-user accounts and roles, webhook-driven triggers, ABI-aware generic tasks, factual ROI (gas spent vs tokens received), browser/email notifications, cooldown visualisation, and a mainnet readiness pass (see Security).
+Multi-user accounts and roles, webhook-driven triggers (with a public-URL check), ABI-aware generic tasks, factual ROI (gas spent vs tokens received), browser/email notifications, cooldown visualisation, and a mainnet readiness pass (see `docs/SECURITY.md`).
